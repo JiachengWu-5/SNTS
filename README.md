@@ -1,14 +1,14 @@
-# SHANYDOC（SNTS）
+# SNTS
 
-SHANYDOC (SNTS, Shanydoc Novel Terminal System) is a local webpage plus a local LLM for writing novels: idea → optional world and characters → chapter-by-chapter outline (including a plot tree) → chapter drafts. Continue, expand, or revise from notes; generate scene illustrations; export the whole book as a PDF. Everything runs on your own machine.
+SNTS (Shanydoc Novel Terminal System) is a local webpage plus a local LLM for writing novels: idea → optional world and characters → chapter-by-chapter outline (including a plot tree) → chapter drafts. Continue, expand, or revise from notes; generate scene illustrations; export the whole book as a PDF. Everything runs on your own machine. SNTS is the acronym; shanydoc is the username.
 
-SHANYDOC（全称 Shanydoc Novel Terminal System，简称 SNTS）是一个在本机运行的小说写作网页。它对接本机的 llama.cpp 兼容服务（例如 `llama-server`），用来：先写思路，可选生成世界观和人物，再生成并编辑大纲（按章、支持情节树与多结局），然后按章写作。支持续写、扩写、按改进意见修改、版本时间线、本章摘要和一致性检查。还可以为场景出插图，并把全书导出为 PDF。
+SNTS（Shanydoc Novel Terminal System）是一个在本机运行的小说写作网页。SNTS 是缩写，shanydoc 是用户名。它对接本机的 llama.cpp 兼容服务（例如 `llama-server`），用来：先写思路，可选生成世界观和人物，再生成并编辑大纲（按章、支持情节树与多结局），然后按章写作。支持续写、扩写、按改进意见修改、版本时间线、本章摘要和一致性检查。还可以为场景出插图，并把全书导出为 PDF。
 
 Python 包目录名仍是 `app`，启动方式见下方的 `start.sh` / `start.bat`。
 
 **扩写**的含义是：保留原文中的句子、对话和情节，只在原句内部或句段之间插入更具体的描写与细节，而不是重写一遍，也不是只在章末追加一段。
 
-成年向内容可以使用；涉及 18 岁以下未成年人的性内容，不能作为文风样本，也不会被正文或插图生成流程采用。
+成年向内容可以使用；18 岁以下未成年人情节不予参考。
 
 本仓库不包含任何作品正文、大纲、思路、人物卡、本章摘要、插图或文风样本，也不包含模型权重。请自行准备模型，并在写作页中添加你自己的文风样本。
 
@@ -25,7 +25,7 @@ Python 包目录名仍是 `app`，启动方式见下方的 `start.sh` / `start.b
 
 ```bash
 git clone <本仓库地址>
-cd SHANYDOC   # 或以你克隆下来的目录名为准
+cd SNTS
 python -m venv .venv
 # Windows:
 .venv\Scripts\activate
@@ -171,6 +171,6 @@ PDF 写进该书的文件夹，同时开始下载。导出在服务端完成，�
 
 ## 许可证
 
-以 MIT 许可证发布，版权所有 © 2026 SHANYDOC。详见 `LICENSE`。
+以 MIT 许可证发布，版权所有 © 2026 shanydoc。详见 `LICENSE`。
 
-本仓库由 SHANYDOC 整理开源，by Grok。
+本仓库由 shanydoc 整理开源，by Grok。
