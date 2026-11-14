@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+  <title>SHANYDOC</title>
+  <link rel="stylesheet" href="/static/style.css?v=snts1" />
+</head>
+<body>
+  <header class="topbar">
+    <button type="button" class="btn small mobile-only" id="btn-open-left">作品</button>
+    <div class="brand">
+      <span class="mark">卷</span>
+      <div>
+        <h1>SHANYDOC</h1>
+        <p>本地小说写作 · 先定大纲，再按章续写</p>
+      </div>
+    </div>
+    <div class="topbar-end">
+      <div class="health" id="health">
+        <span class="dot"></span>
+        <span class="health-text">正在检查写作模型…</span>
+      </div>
+      <button type="button" class="btn small mobile-only body-only hidden" id="btn-open-illust">插图</button>
+      <button type="button" class="btn small mobile-only" id="btn-open-right">章节</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="pane left" id="pane-left">
+      <button type="button" class="pane-rail desktop-only" id="btn-expand-left" title="展开作品栏">作品</button>
+      <div class="pane-body">
+      <section class="left-section" data-left-section="books">
+        <div class="section-head">
+          <button type="button" class="section-toggle" data-toggle-section="books" aria-expanded="true">
+            <span class="section-chevron" aria-hidden="true"></span>
+            <h2>作品</h2>
+          </button>
+          <div class="row">
+            <button type="button" class="btn small desktop-only" id="btn-collapse-left" title="收起作品栏">收起</button>
+            <button type="button" class="btn small mobile-only" id="btn-close-left">关闭</button>
+          </div>
+        </div>
+        <div class="section-body">
+        <form id="create-book-form" class="create-row">
+          <input type="text" id="new-book-name" placeholder="新书名" maxlength="80" autocomplete="off" />
+          <button type="submit" class="btn">新建</button>
+        </form>
+        <ul class="book-list" id="book-list"></ul>
+        </div>
+      </section>
+
+      <section class="left-section is-collapsed" data-left-section="styles">
+        <div class="section-head">
+          <button type="button" class="section-toggle" data-toggle-section="styles" aria-expanded="false">
+            <span class="section-chevron" aria-hidden="true"></span>
+            <h2>文风样本</h2>
+          </button>
+          <button type="button" class="btn small" id="btn-refresh-styles">刷新</button>
+        </div>
+        <div class="section-body">
+        <p class="hint">勾选后，生成大纲和章节时会参考这些文字的语气与句式。改完模板文件后点刷新，会重新扫描并放行可以勾选的样本。</p>
+        <div id="style-list" class="style-list"></div>
+        <textarea id="style-paste" rows="4" placeholder="在此粘贴参考文字，保存到当前作品"></textarea>
+        <div class="row">
+          <button type="button" class="btn" id="btn-paste-style">保存粘贴</button>
+          <label class="btn ghost file-btn">上传 .txt
+            <input type="file" id="style-upload" accept=".txt,text/plain" hidden />
+          </label>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <input type="url" id="style-url" placeholder="或粘贴网页链接，抓取正文作为文风" />
+          <button type="button" class="btn" id="btn-fetch-style">抓取网页</button>
+        </div>
+        <p class="status" id="style-status"></p>
+        </div>
+      </section>
+
+      <section class="left-section is-collapsed" data-left-section="params">
+        <div class="section-head">
+          <button type="button" class="section-toggle" data-toggle-section="params" aria-expanded="false">
+            <span class="section-chevron" aria-hidden="true"></span>
+            <h2>生成参数</h2>
+          </button>
+        </div>
+        <div class="section-body">
+        <label class="field">温度
+          <input type="range" id="param-temp" min="0" max="1.5" step="0.05" value="0.8" />
+          <span id="param-temp-val">0.8</span>
+        </label>
+        <label class="field">每章目标字数（汉字）
+          <input type="number" id="param-chars" min="200" max="20000" step="100" value="2000" />
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="param-thinking" />
+          <span>先思考再写正文（会为正文单独留出字数）</span>
+        </label>
+        <label class="field">写作模型地址
+          <input type="text" id="param-url" value="http://127.0.0.1:8080" spellcheck="false" />
+        </label>
+        </div>
+      </section>
+
+      <section class="left-section" data-left-section="timeline">
+        <div class="section-head">
+          <button type="button" class="section-toggle" data-toggle-section="timeline" aria-expanded="true">
+            <span class="section-chevron" aria-hidden="true"></span>
+            <h2>时间线</h2>
+          </button>
+          <button type="button" class="btn small" id="btn-refresh-timeline" title="刷新时间线">刷新</button>
+        </div>
+        <div class="section-body">
+          <p class="hint" id="timeline-hint">打开正文或大纲后查看时间线</p>
+          <ul class="timeline-list" id="timeline-list"></ul>
+        </div>
+      </section>
+      </div>
+    </aside>
+
+    <section class="pane mid">
+      <nav class="tabs" id="tabs">
+        <button type="button" data-stage="idea" class="tab active">思路</button>
+        <button type="button" data-stage="world" class="tab">世界观</button>
+        <button type="button" data-stage="characters" class="tab">人物</button>
+        <button type="button" data-stage="outline" class="tab">大纲 / 故事线</button>
+        <button type="button" data-stage="body" class="tab">正文</button>
+      </nav>
+
+      <div class="stage" data-stage-panel="idea">
+        <div class="toolbar">
+          <p class="lead">先写下这本小说的思路。确认后可生成大纲；也可以从思路生成世界观和人物，这两项都是可选的，不写也不影响正文和改正文。</p>
+          <div class="row">
+            <button type="button" class="btn" id="btn-gen-world">生成世界观</button>
+            <button type="button" class="btn" id="btn-gen-characters">生成人物</button>
+            <button type="button" class="btn primary" id="btn-gen-outline">生成大纲</button>
+          </div>
+        </div>
+        <textarea id="idea-editor" class="editor" placeholder="在这里写下主题、人物关系、想写的情节方向……"></textarea>
+        <footer class="count">
+          <span><span id="idea-count">0</span> 字</span>
+          <button type="button" class="btn small" id="btn-clear-idea">清空</button>
+        </footer>
+      </div>
+
+      <div class="stage hidden" data-stage-panel="world">
+        <div class="toolbar">
+          <p class="lead">写下这本书需要前后一致的世界设定。写大纲和正文时会自动带上；留空则不会进入提示。</p>
+          <div class="row">
+            <button type="button" class="btn" id="btn-draft-world">从思路草稿</button>
+          </div>
+        </div>
+        <textarea id="world-editor" class="editor" placeholder="时代背景、世界规则、重要地点、需要前后一致的禁忌与前提……"></textarea>
+        <footer class="count">
+          <span><span id="world-count">0</span> 字</span>
+          <button type="button" class="btn small" id="btn-clear-world">清空</button>
+        </footer>
+      </div>
+
+      <div class="stage hidden" data-stage-panel="characters">
+        <div class="toolbar">
+          <p class="lead">每人一张轻量设定。当前状态用补丁按情节线累积，不同结局互不影响。文风样本仍然只负责怎么写。</p>
+          <div class="row">
+            <button type="button" class="btn primary" id="btn-add-character">添加人物</button>
+          </div>
+        </div>
+        <div class="character-workspace">
+          <div class="character-list-panel">
+            <div class="section-head">
+              <h2>人物一览</h2>
+            </div>
+            <ul class="character-list" id="character-list"></ul>
+          </div>
+          <div class="character-editor-panel" id="character-editor-panel">
+            <p class="hint" id="character-empty">先添加一个人物，或在左侧点选一张卡片。</p>
+            <div id="character-detail" class="hidden">
+              <label class="field">名称
+                <input type="text" id="character-name" maxlength="40" autocomplete="off" />
+              </label>
+              <label class="field">基础设定
+                <textarea id="character-basics" rows="8" placeholder="身份、性格、与本书相关的固定设定……"></textarea>
+              </label>
+              <label class="field">外形
+                <textarea id="character-appearance" rows="4" placeholder="选填。外貌、体态、常穿的衣服等可见特征，出图时会用到。不填也不影响写作。"></textarea>
+              </label>
+              <div class="section-head">
+                <h2>当前这条线上的状态</h2>
+                <button type="button" class="btn small" id="btn-add-patch">添加补丁</button>
+              </div>
+              <p class="hint" id="character-path-hint">补丁会记在引起变化的那一章旁边，只沿当前情节线往下累积。</p>
+              <pre class="current-state" id="character-state"></pre>
+              <ul class="patch-list" id="patch-list"></ul>
+              <div class="row">
+                <button type="button" class="btn" id="btn-delete-character">删除人物</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="stage hidden" data-stage-panel="outline">
+        <div class="toolbar">
+          <p class="lead">可以自己改大纲，也可以先点选一章写本章大纲，或按章追加下一章，或在下面写下改进思路，让模型在现有大纲上修改。改完会自动保存，确认后再按章写作。</p>
+          <div class="row">
+            <button type="button" class="btn" id="btn-fill-outline">写本章大纲</button>
+            <button type="button" class="btn" id="btn-next-outline">写下一章大纲</button>
+            <button type="button" class="btn" id="btn-save-outline">保存大纲</button>
+            <button type="button" class="btn" id="btn-regen-outline">从思路重新生成</button>
+            <button type="button" class="btn primary" id="btn-confirm-outline">确认大纲，开始写正文</button>
+          </div>
+        </div>
+        <div class="extras" id="outline-extras">
+          <button type="button" class="btn extras-toggle" id="btn-toggle-outline-extras" aria-expanded="false">改进思路</button>
+          <div class="extras-body">
+            <div class="field revise-field">
+              <div class="field-head">
+                <span>改进思路</span>
+                <button type="button" class="btn small" id="btn-clear-outline-revise">清空</button>
+              </div>
+              <textarea id="outline-revise" rows="3" placeholder="例如：加强主线冲突、改一下结局、把某章的钩子写明确……不必自己动手改大纲。"></textarea>
+            </div>
+            <p class="hint">「按改进思路修改当前大纲」会以现有大纲为底稿，只改你提到的部分；修改前会自动备份上一版。</p>
+            <div class="row revise-actions">
+              <button type="button" class="btn primary" id="btn-revise-outline">按改进思路修改当前大纲</button>
+              <button type="button" class="btn" id="btn-restore-outline">恢复上一版大纲</button>
+            </div>
+          </div>
+        </div>
+        <div class="outline-workspace">
+          <div class="plot-tree-panel" id="outline-tree-panel">
+            <div class="section-head">
+              <h2>情节脉络</h2>
+              <div class="row plot-tree-actions">
+                <button type="button" class="btn small" id="btn-tree-open">打开本章</button>
+                <button type="button" class="btn small" id="btn-tree-branch">从这里添加结局分支</button>
+                <button type="button" class="btn small" id="btn-tree-delete">删除本章正文</button>
+              </div>
+            </div>
+            <p class="hint">点击节点会跳到右侧大纲的对应段落；在大纲里点击也会选中左侧节点。要写正文请点「打开本章」。写作时只看当前这条线。</p>
+            <div class="plot-tree-scroll" id="outline-tree" aria-label="情节脉络图"></div>
+          </div>
+          <div class="outline-write">
+            <textarea id="outline-editor" class="editor" placeholder="生成或粘贴大纲、故事线……"></textarea>
+            <footer class="count">
+              <span><span id="outline-count">0</span> 字</span>
+              <button type="button" class="btn small" id="btn-clear-outline">清空</button>
+            </footer>
+          </div>
+        </div>
+      </div>
+
+      <div class="stage hidden" data-stage-panel="body">
+        <div class="toolbar">
+          <div>
+            <h3 id="chapter-title">尚未选择章节</h3>
+            <p class="path-line" id="chapter-path"></p>
+            <p class="lead">按大纲一章一章写。写到满意时先点「保存本章」，会单独留一份存档，再写下章或重新生成也不会盖掉。</p>
+          </div>
+          <div class="row">
+            <button type="button" class="btn primary" id="btn-gen-chapter">生成本章</button>
+            <button type="button" class="btn" id="btn-continue-chapter">续写本章</button>
+            <button type="button" class="btn" id="btn-expand-chapter">扩写本章</button>
+            <button type="button" class="btn" id="btn-save-chapter">保存本章</button>
+            <button type="button" class="btn" id="btn-export-pdf">导出全书 PDF</button>
+            <button type="button" class="btn" id="btn-check-consistency">检查一致性</button>
+            <button type="button" class="btn" id="btn-restore-saved-chapter">恢复已保存的本章</button>
+            <button type="button" class="btn" id="btn-delete-chapter">删除本章正文</button>
+          </div>
+        </div>
+        <div class="extras" id="chapter-extras">
+          <button type="button" class="btn extras-toggle" id="btn-toggle-chapter-extras" aria-expanded="false">改进意见</button>
+          <div class="extras-body">
+            <div class="field revise-field">
+              <div class="field-head">
+                <span>改进意见</span>
+                <button type="button" class="btn small" id="btn-clear-chapter-revise">清空</button>
+              </div>
+              <textarea id="chapter-revise" rows="3" placeholder="例如：按大纲把某段情节改回来、删掉跑偏的线索、把某个人的反应写得更明确……不必自己整章重写。"></textarea>
+            </div>
+            <p class="hint">「扩写本章」会保留你已经写好的句子，在中间补充描写和细节，把篇幅扩向目标字数；不是整章重写，也不是只在结尾另写一段。「按改进意见修改当前正文」会以现有正文为底稿，只改你提到的部分。扩写或修改前会自动备份上一版。</p>
+            <div class="row revise-actions">
+              <button type="button" class="btn primary" id="btn-revise-chapter">按改进意见修改当前正文</button>
+              <button type="button" class="btn" id="btn-restore-chapter">恢复上一版正文</button>
+            </div>
+          </div>
+        </div>
+        <div class="extras" id="synopsis-extras">
+          <button type="button" class="btn extras-toggle" id="btn-toggle-synopsis" aria-expanded="false">本章摘要</button>
+          <div class="extras-body">
+            <p class="hint">写到本章为止的摘要。写下一章时会连同上章正文一起作为参考。保存本章后会尝试自动更新，你也可以直接改。不会改动正文。</p>
+            <textarea id="path-synopsis" rows="3" placeholder="尚无本章摘要。路径较短时，上一章全文就够用；写完并保存本章后会自动更新。"></textarea>
+          </div>
+        </div>
+        <div class="consistency-panel hidden" id="consistency-panel"></div>
+        <textarea id="chapter-editor" class="editor" placeholder="选择右侧章节后，在这里编辑或生成正文。"></textarea>
+        <footer class="count">
+          <span>
+            <span id="chapter-count">0</span> 字
+            <span class="sep">/</span>
+            目标 <span id="chapter-target">2000</span> 字
+          </span>
+          <button type="button" class="btn small" id="btn-clear-chapter">清空</button>
+        </footer>
+      </div>
+
+      <div class="progress hidden" id="progress">
+        <div class="progress-row">
+          <div class="progress-bar"><i id="progress-fill"></i></div>
+          <button type="button" class="btn danger" id="btn-stop">停止</button>
+        </div>
+        <p id="progress-text">准备生成…</p>
+      </div>
+    </section>
+
+    <aside class="pane illust" id="pane-illust">
+      <button type="button" class="pane-rail desktop-only" id="btn-expand-illust" title="展开插图栏">插图</button>
+      <div class="pane-body">
+      <section>
+        <div class="section-head">
+          <h2>插图</h2>
+          <div class="row">
+            <button type="button" class="btn small desktop-only" id="btn-collapse-illust" title="收起插图栏">收起</button>
+            <button type="button" class="btn small mobile-only" id="btn-close-illust">关闭</button>
+          </div>
+        </div>
+        <p class="hint" id="illust-hint">为当前章配图。先写画面说明，确认后再出图。图会先出现在这里，满意后再插入正文。</p>
+        <div class="row" id="illust-actions">
+          <button type="button" class="btn" id="btn-illust-passage">为这段配图</button>
+          <button type="button" class="btn" id="btn-illust-chapter">为本章配图</button>
+          <button type="button" class="btn" id="btn-illust-finish" disabled>出图结束</button>
+        </div>
+        <p class="hint hidden" id="illust-session-hint">正在出图会话中，可改说明再出几张。写完后请点「出图结束」，以重新加载写作模型。</p>
+        <p class="hint hidden" id="illust-status"></p>
+        <div id="illust-progress" class="illust-progress hidden">
+          <div class="progress-bar"><i id="illust-progress-fill"></i></div>
+          <p id="illust-progress-text">准备出图…</p>
+        </div>
+        <div id="illust-prompt-box" class="illust-prompt-box hidden">
+          <label class="field">画面说明
+            <textarea id="illust-prompt" rows="6" placeholder="写作模型拟好的画面说明会出现在这里，你可以改完再出图。"></textarea>
+          </label>
+          <div class="row">
+            <button type="button" class="btn primary" id="btn-illust-generate">确认出图</button>
+          </div>
+        </div>
+        <ul class="illust-list" id="illust-list"></ul>
+      </section>
+      </div>
+    </aside>
+
+    <aside class="pane right" id="pane-right">
+      <button type="button" class="pane-rail desktop-only" id="btn-expand-right" title="展开章节栏">章节</button>
+      <div class="pane-body">
+      <section>
+        <div class="section-head">
+          <h2>章节</h2>
+          <div class="row">
+            <button type="button" class="btn small" id="btn-list-branch">添加结局分支</button>
+            <button type="button" class="btn small" id="btn-add-chapter">给大纲加一章</button>
+            <button type="button" class="btn small desktop-only" id="btn-collapse-right" title="收起章节栏">收起</button>
+            <button type="button" class="btn small mobile-only" id="btn-close-right">关闭</button>
+          </div>
+        </div>
+        <p class="hint">点开即可编辑。选中一章后可添加结局分支；大纲不够时，可以在这里追加新章。</p>
+        <ul class="chapter-list" id="chapter-list"></ul>
+      </section>
+      </div>
+    </aside>
+  </main>
+
+  <div class="drawer-backdrop" id="drawer-backdrop"></div>
+  <div class="modal hidden" id="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+    <div class="modal-card">
+      <h3 id="dialog-title"></h3>
+      <p class="lead" id="dialog-lead"></p>
+      <form id="dialog-form" class="dialog-form"></form>
+      <div class="row dialog-actions">
+        <button type="button" class="btn primary" id="dialog-ok">确定</button>
+        <button type="button" class="btn" id="dialog-cancel">取消</button>
+      </div>
+    </div>
+  </div>
+  <div class="modal hidden" id="timeline-dialog" role="dialog" aria-modal="true" aria-labelledby="timeline-dialog-title">
+    <div class="modal-card timeline-card">
+      <div class="section-head">
+        <h3 id="timeline-dialog-title">时间线预览</h3>
+        <button type="button" class="btn small" id="timeline-dialog-close">关闭</button>
+      </div>
+      <p class="meta" id="timeline-dialog-meta"></p>
+      <textarea id="timeline-dialog-text" class="editor timeline-preview" readonly></textarea>
+      <div class="row dialog-actions">
+        <button type="button" class="btn primary" id="timeline-dialog-restore">恢复这一版</button>
+        <button type="button" class="btn" id="timeline-dialog-cancel">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="illust-lightbox hidden" id="illust-lightbox" role="dialog" aria-modal="true" aria-label="插图预览">
+    <div class="illust-lightbox-backdrop" id="illust-lightbox-backdrop"></div>
+    <div class="illust-lightbox-card">
+      <button type="button" class="btn small illust-lightbox-close" id="illust-lightbox-close">关闭</button>
+      <img id="illust-lightbox-image" alt="插图预览" />
+      <div class="row illust-lightbox-actions">
+        <button type="button" class="btn" id="illust-lightbox-save">保存</button>
+      </div>
+    </div>
+  </div>
+  <div class="toast hidden" id="toast"></div>
+  <script src="/static/app.js?v=snts1"></script>
+</body>
+</html>

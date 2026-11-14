@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+
+# Models and weights (never commit these)
+*.gguf
+*.safetensors
+*.bin
+models/
+
+# Book data and generated output (never commit these)
+/data/
+/Article/
+template/
+output/
+outputs/
+images/
+*.pdf
+
+# Logs and local helpers
+logs/
+*.log
+_demo*.log
+_run_*.py
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Archives
+*.msi
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.rar
