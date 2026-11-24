@@ -27,29 +27,18 @@ FONT_NAME_BOLD = "BookBodyBold"
 # Subtle ink color for clickable TOC titles (not web blue).
 _TOC_LINK_RGB = (0.22, 0.16, 0.12)
 
-# Prefer a CJK font. Windows 微软雅黑 / 宋体 first, then common macOS and
-# Linux CJK fonts. Do not silently fall back to a Latin-only font, or the
-# PDF would show boxes / missing glyphs.
+# Production fonts only: Windows 微软雅黑, then 宋体. Do not silently fall back
+# to a Latin font, or the PDF would show boxes / missing glyphs.
 _FONT_CANDIDATES = (
     Path(r"C:\Windows\Fonts\msyh.ttc"),
     Path(r"C:\Windows\Fonts\msyh.ttf"),
     Path(r"C:\Windows\Fonts\simsun.ttc"),
     Path(r"C:\Windows\Fonts\simsun.ttf"),
-    Path("/System/Library/Fonts/STHeiti Light.ttc"),
-    Path("/System/Library/Fonts/PingFang.ttc"),
-    Path("/Library/Fonts/Songti.ttc"),
-    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-    Path("/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc"),
-    Path("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
-    Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
 )
 _BOLD_CANDIDATES = (
     Path(r"C:\Windows\Fonts\msyhbd.ttc"),
     Path(r"C:\Windows\Fonts\msyhbd.ttf"),
     Path(r"C:\Windows\Fonts\simhei.ttf"),
-    Path("/System/Library/Fonts/STHeiti Medium.ttc"),
-    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
-    Path("/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc"),
 )
 
 _INVALID_FILE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')

@@ -125,6 +125,9 @@ AUTO_CONTINUE_RATIO = 0.85
 AUTO_CONTINUE_MAX_ROUNDS = 8
 AUTO_CONTINUE_MIN_ADD_HANZI = 200
 AUTO_CONTINUE_MAX_STALLS = 2
+AUTO_CONTINUE_DEDUPE_REVISION = (
+    "检查并去除本章重复片段，只删重复的句子和段落，其余情节、措辞和未提到的部分一律不动。"
+)
 EXPAND_MIN_GROWTH_HANZI = 200
 EXPAND_MIN_COVER = 0.7
 AUTO_EXPAND_MAX_ROUNDS = 4
@@ -136,6 +139,44 @@ def should_auto_continue(text: str, target_chars: int) -> bool:
     """True when the chapter is still short of the allowed 15% window under the target."""
     target = max(200, int(target_chars or 0))
     return count_hanzi(text) < int(target * AUTO_CONTINUE_RATIO)
+
+
+
+def should_stop_after_dedupe(before_hanzi: int, added: int, after_hanzi: int) -> bool:
+    """True when a post-continue revise removed almost all of the newly added text."""
+    kept_added = after_hanzi - before_hanzi
+    threshold = min(AUTO_CONTINUE_MIN_ADD_HANZI, max(0, int(added * 0.3)))
+    return kept_added < threshold
+
+
+async def _auto_continue_dedupe_repeats(
+    *,
+    book_name: str,
+    cid: str,
+    chapter_stored: str,
+    style_ids: list[str] | None,
+    temperature: float | None,
+    enable_thinking: bool | None,
+    target_chars: int | None,
+    llm_url: str | None,
+    cancel_event,
+) -> AsyncIterator[StreamEvent]:
+    """Run the existing revise path to drop repeated fragments after auto-continue."""
+    yield StreamEvent(kind="status", message="正在检查并去除本章重复片段…")
+    async for event in generate_chapter(
+        book_name,
+        cid,
+        mode="revise",
+        style_ids=style_ids,
+        temperature=temperature,
+        enable_thinking=enable_thinking,
+        target_chars=target_chars,
+        llm_url=llm_url,
+        revision=AUTO_CONTINUE_DEDUPE_REVISION,
+        chapter_text=chapter_stored,
+        cancel_event=cancel_event,
+    ):
+        yield event
 
 
 def _strip_leading_chapter_title(text: str) -> str:
@@ -229,7 +270,7 @@ def continue_prompt_pieces(chapter_num: int, target_chars: int, current: str, re
     )
     requirements = (
         "1. 必须严格按「本章大纲」中的情节、人物、场景、时间点和章末收束来写，不得改换故事线，也不得把其他章节的核心事件提前写进本章。\n"
-        "2. 故事要沿着完整弧线走，不要把本章写成互不关联的场景堆叠；同时承接前面已经写好、并经过修改的正文。\n"
+        "2. 故事要沿着完整弧线走，不要把本章写成互不关联的场景堆叠；同时承接前面已经写好、并经过修改的正文。若有「路径前情摘要」，其中已锁定的地点、谁去谁的住处、时间和人物状态不得写反。\n"
         "3. 文风样本只供参考语气、句式和节奏。禁止使用样本中的人物、情节、设定或原句，更不得用样本故事替换本章大纲。\n"
         "4. 所有人物年龄 18 岁或以上。不得出现未成年人（未满 18 岁）的色情描写。\n"
         "5. 只输出尚未写过的新段落。第一句必须紧接上文最后一句。禁止输出本章标题，禁止从开头重写或复述已有正文。不要写作说明、字数统计或思考过程。\n"
@@ -790,8 +831,8 @@ async def generate_outline(
     if idea is not None:
         books.write_idea(book_name, idea)
     idea_text = (idea if idea is not None else books.read_idea(book_name)).strip()
+    settings_block = longform.setting_prompt_blocks(book_name)
     world_text = longform.world_prompt_text(book_name)
-    world_block = f"【世界观】\n{world_text}\n\n" if world_text else ""
     revision_text = (revision or "").strip()
     if outline is not None:
         outline_text = outline.strip()
@@ -818,7 +859,7 @@ async def generate_outline(
         target_chars = max(2500, min(count_hanzi(outline_text) + 800, 8000))
 
     output_tokens = int(target_chars * 2.0) + 512 + (THINKING_RESERVE_TOKENS if enable_thinking else 0)
-    prompt_guess = len(idea_text) + len(revision_text) + len(outline_text) + len(world_text) + 1600
+    prompt_guess = len(idea_text) + len(revision_text) + len(outline_text) + len(settings_block) + 1600
     excerpts = _load_styles(book_name, ids, prompt_chars_guess=prompt_guess, output_tokens=output_tokens)
 
     if revision_text:
@@ -829,13 +870,13 @@ async def generate_outline(
             "2. 只改改进思路明确要求的部分，改动要落到具体情节上，不要只复述原文，也不要另起一套故事线。\n"
             "3. 如果改进思路需要增删或合并章节，在原有结构上调整，并保持前后情节连贯。\n"
             "4. 保留原书名，除非改进思路明确要求改名。人物、情节保持原创；所有人物年龄 18 岁或以上。\n"
-            "5. 若提供了世界观，设定须与之相符，不要改写世界观文档本身。\n"
+            "5. 若提供了世界观或人物设定，大纲须与之相符，不要改写这些设定本身。\n"
             "6. 文风样本只供参考语气和句式，禁止用样本里的情节替换当前大纲。\n"
             "7. 只输出修订后的完整 Markdown 大纲，不要前言、修改说明或对照表。\n\n"
             f"{_outline_format_instructions()}\n"
             f"【改进思路】\n{revision_text}\n\n"
             f"【原思路】\n{idea_text or '（无）'}\n\n"
-            f"{world_block}"
+            f"{settings_block}"
             f"【当前大纲】\n{outline_text}\n\n"
             f"【文风参考】\n{_style_block(excerpts)}\n"
         )
@@ -847,12 +888,12 @@ async def generate_outline(
             "2. 再写完整故事线，必须有起承转合和贯穿全书的情节弧线，不要只是场景堆叠。\n"
             "3. 然后按章节给出大纲，每一章写清主要事件、冲突与章末钩子，章数根据思路自行安排。\n"
             "4. 人物、情节保持原创；所有人物年龄 18 岁或以上。\n"
-            "5. 若提供了世界观，大纲设定须与之相符，不要改写或复述成另一份世界观。\n"
+            "5. 若提供了世界观或人物设定，大纲须与之相符，不要改写这些设定本身，也不要复述成另一份世界观。\n"
             "6. 尽量贴近文风样本的语气、句式和叙事节奏，但不要抄袭样本情节或原句。\n"
             "7. 只输出下方 Markdown 结构，不要前言后记。\n\n"
             f"{_outline_format_instructions()}\n"
             f"【思路】\n{idea_text}\n\n"
-            f"{world_block}"
+            f"{settings_block}"
             f"【文风参考】\n{_style_block(excerpts)}\n"
         )
     messages = [
@@ -1017,7 +1058,7 @@ async def generate_chapter(
         )
         requirements = (
             "1. 必须严格按「本章大纲」中的情节、人物、场景、时间点和章末收束来写，不得改换故事线，也不得把其他章节的核心事件提前写进本章。\n"
-            "2. 故事要沿着完整弧线走，不要把本章写成互不关联的场景堆叠；同时承接前面已经写好、并经过修改的正文。\n"
+            "2. 故事要沿着完整弧线走，不要把本章写成互不关联的场景堆叠；同时承接前面已经写好、并经过修改的正文。若有「路径前情摘要」，其中已锁定的地点、谁去谁的住处、时间和人物状态不得写反。\n"
             "3. 文风样本只供参考语气、句式和节奏。禁止使用样本中的人物、情节、设定或原句，更不得用样本故事替换本章大纲。\n"
             "4. 所有人物年龄 18 岁或以上。不得出现未成年人（未满 18 岁）的色情描写。\n"
             "5. 只输出本章正文（可含本章标题），不要写作说明、字数统计或思考过程。\n"
@@ -1036,7 +1077,7 @@ async def generate_chapter(
         current_block = ""
         requirements = (
             "1. 必须严格按「本章大纲」中的情节、人物、场景、时间点和章末收束来写，不得改换故事线，也不得把其他章节的核心事件提前写进本章。\n"
-            "2. 故事要沿着完整弧线走，不要把本章写成互不关联的场景堆叠；同时承接前面已经写好、并经过修改的正文。\n"
+            "2. 故事要沿着完整弧线走，不要把本章写成互不关联的场景堆叠；同时承接前面已经写好、并经过修改的正文。若有「路径前情摘要」，其中已锁定的地点、谁去谁的住处、时间和人物状态不得写反。\n"
             "3. 文风样本只供参考语气、句式和节奏。禁止使用样本中的人物、情节、设定或原句，更不得用样本故事替换本章大纲。\n"
             "4. 所有人物年龄 18 岁或以上。不得出现未成年人（未满 18 岁）的色情描写。\n"
             "5. 只输出本章正文（可含本章标题），不要写作说明、字数统计或思考过程。\n"
@@ -1273,6 +1314,42 @@ async def generate_chapter(
 
         final_event = done_event
         added = count_hanzi(chapter_text) - before_hanzi
+        if auto_round > 0 and added > 0:
+            dedupe_done = None
+            async for event in _auto_continue_dedupe_repeats(
+                book_name=book_name,
+                cid=cid,
+                chapter_stored=chapter_stored,
+                style_ids=ids,
+                temperature=temperature,
+                enable_thinking=enable_thinking,
+                target_chars=target_chars,
+                llm_url=llm_url,
+                cancel_event=cancel_event,
+            ):
+                if event.kind == "done" and (event.text or "").strip():
+                    dedupe_done = event
+                elif event.kind == "cancelled":
+                    yield event
+                    return
+                elif event.kind == "error":
+                    yield StreamEvent(
+                        kind="status",
+                        message="去除重复时没有改出可用正文，已保留补字后的原稿",
+                    )
+                else:
+                    yield event
+            if dedupe_done:
+                chapter_stored = dedupe_done.text
+                chapter_text = chapter_text_for_llm(chapter_stored)
+                final_event = dedupe_done
+                if should_stop_after_dedupe(before_hanzi, added, count_hanzi(chapter_text)):
+                    yield StreamEvent(
+                        kind="status",
+                        message="补字后的重复片段已去掉，几乎没有留下新内容，本章不再为凑字数继续补。",
+                    )
+                    yield final_event
+                    return
         if not should_auto_continue(chapter_text, target_chars):
             yield final_event
             return
@@ -1931,6 +2008,8 @@ async def generate_next_outline_chapter(
     enable_thinking: bool | None = None,
     llm_url: str | None = None,
     cancel_event=None,
+    pacing_note: str | None = None,
+    allow_ending_marker: bool = False,
 ) -> AsyncIterator[StreamEvent]:
     """Append only the next chapter's outline on the current plot branch."""
     books.ensure_book(book_name)
@@ -1955,8 +2034,7 @@ async def generate_next_outline_chapter(
     temperature = settings["temperature"] if temperature is None else temperature
     enable_thinking = settings["enable_thinking"] if enable_thinking is None else enable_thinking
     llm_url = llm_url or settings["llm_url"]
-    world_text = longform.world_prompt_text(book_name)
-    world_block = f"【世界观】\n{world_text}\n\n" if world_text else ""
+    settings_block = longform.setting_prompt_blocks(book_name, spec.get("parent_id") or from_chapter)
     existing = spec.get("outline") or ""
     path_outline = spec.get("path_outline") or existing
     target_chars = 800 if not spec["is_first"] else 900
@@ -1964,7 +2042,7 @@ async def generate_next_outline_chapter(
     excerpts = _load_styles(
         book_name,
         ids,
-        prompt_chars_guess=len(idea_text) + len(path_outline) + len(world_text) + 800,
+        prompt_chars_guess=len(idea_text) + len(path_outline) + len(settings_block) + 800,
         output_tokens=output_tokens,
         max_total_chars=800,
     )
@@ -1976,7 +2054,7 @@ async def generate_next_outline_chapter(
             "要求：\n"
             "1. 可以先写书名和「## 大纲」标题，然后只写「第一章」这一节。\n"
             "2. 第一章写清主要事件、冲突与章末钩子。人物、情节保持原创；所有人物年龄 18 岁或以上。\n"
-            "3. 若提供了世界观，须与之相符，不要改写世界观。\n"
+            "3. 若提供了世界观或人物设定，须与之相符，不要改写这些设定本身。\n"
             "4. 不要写第二章及之后的章节。只输出 Markdown，不要前言后记。\n\n"
             "输出格式：\n"
             "# 《书名》\n\n"
@@ -1984,7 +2062,7 @@ async def generate_next_outline_chapter(
             f"{heading} 标题\n\n"
             "……\n\n"
             f"【思路】\n{idea_text or '（无）'}\n\n"
-            f"{world_block}"
+            f"{settings_block}"
             f"【文风参考】\n{_style_block(excerpts)}\n"
         )
     else:
@@ -1994,13 +2072,25 @@ async def generate_next_outline_chapter(
             f"1. 只输出下一章这一节，标题以「{heading}」开头，后接本章标题。不要输出书名、故事线或其他章节。\n"
             f"2. {branch_note}\n"
             "3. 承接已经写好的各章，写清本章主要事件、冲突与章末钩子。不要重复上一章已发生的核心事件。\n"
-            "4. 人物、情节保持原创；所有人物年龄 18 岁或以上。若提供了世界观，须与之相符。\n"
+            "4. 人物、情节保持原创；所有人物年龄 18 岁或以上。若提供了世界观或人物设定，须与之相符，不要改写这些设定本身。\n"
             "5. 只输出这一章的 Markdown 小节，不要前言、说明或完整大纲。\n\n"
             f"【思路】\n{idea_text or '（无）'}\n\n"
-            f"{world_block}"
+            f"{settings_block}"
             f"【当前这条线上已有的大纲（不得改写，只供承接）】\n{path_outline or '（无）'}\n\n"
             f"【文风参考】\n{_style_block(excerpts)}\n"
         )
+    if allow_ending_marker or (pacing_note or "").strip():
+        note = (pacing_note or "").strip()
+        extra_rules = ""
+        if allow_ending_marker:
+            extra_rules = (
+                (f"{note}\n" if note else "")
+                + f"若本章已是当前这条线的收尾，请在本节末单独一行写上 {longform.ENDING_MARKER}。"
+                "若本章还不是收尾，不要写该标记，章末留下钩子。不要一次写出后面多章，也不要另开新的结局分支。\n"
+            )
+        else:
+            extra_rules = note + "\n"
+        user = user.rstrip() + "\n\n【收尾约定】\n" + extra_rules
     messages = [
         {"role": "system", "content": SYSTEM_RULES},
         {"role": "user", "content": user},
@@ -2028,6 +2118,8 @@ async def generate_next_outline_chapter(
             if not section.strip():
                 yield StreamEvent(kind="error", message="未能写出独立的下一章大纲，已保留原大纲")
                 return
+            if allow_ending_marker and longform.outline_section_is_ending(section):
+                section = longform.ensure_ending_marker(section)
             if existing.strip():
                 books.backup_outline(book_name)
             merged = longform.append_outline_section(existing, section)
@@ -2050,8 +2142,479 @@ async def generate_next_outline_chapter(
                 "appended": True,
                 "section": section,
                 "outline": full,
+                "num": spec.get("num"),
+                "is_ending": longform.outline_section_is_ending(section),
             }
         yield event
+
+
+async def generate_outline_until_end(
+    book_name: str,
+    *,
+    idea: str | None = None,
+    outline: str | None = None,
+    from_chapter: str | None = None,
+    target_chapters: int | None = None,
+    target_book_chars: int | None = None,
+    style_ids: list[str] | None = None,
+    temperature: float | None = None,
+    enable_thinking: bool | None = None,
+    llm_url: str | None = None,
+    cancel_event=None,
+) -> AsyncIterator[StreamEvent]:
+    """Keep appending the next outline chapter on the current branch until it ends or hits a cap."""
+    books.ensure_book(book_name)
+    settings = books.load_settings(book_name)
+    if idea is not None:
+        books.write_idea(book_name, idea)
+    if outline is not None and outline.strip():
+        books.write_outline(book_name, outline.strip() + "\n")
+
+    from app.tree import get_book_tree
+
+    tree = get_book_tree(book_name)
+    if tree.get("has_forks") and not from_chapter:
+        yield StreamEvent(kind="error", message="当前大纲已有分叉，请先在情节脉络中点选要继续的那条线")
+        return
+
+    chapter_target = settings.get("chapter_target_chars") or 2000
+    pending_outline = outline
+    written_new = 0
+    last_outline = books.read_outline(book_name)
+
+    while True:
+        if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+            yield StreamEvent(
+                kind="cancelled",
+                message="已停止，已写好的大纲都保留了",
+                text=last_outline,
+                extra={"outline": last_outline, "written_new": written_new, "hanzi": count_hanzi(last_outline)},
+            )
+            return
+        try:
+            spec = longform.next_outline_spec(book_name, from_chapter)
+        except BookError as exc:
+            yield StreamEvent(kind="error", message=str(exc))
+            return
+
+        current_num = max(0, int(spec.get("num") or 1) - 1)
+        plan = longform.outline_until_plan(
+            current_num,
+            target_chapters=target_chapters,
+            target_book_chars=target_book_chars,
+            chapter_target_chars=chapter_target,
+            written_new=written_new,
+        )
+        if plan["already_complete"]:
+            full = books.read_outline(book_name)
+            yield StreamEvent(
+                kind="done",
+                text=full,
+                extra={
+                    "reason": "already_complete",
+                    "message": "当前这条线已经达到目标章数，没有再往下写",
+                    "outline": full,
+                    "hanzi": count_hanzi(full),
+                    "written_new": written_new,
+                },
+            )
+            return
+        if plan["safety_hit"]:
+            full = books.read_outline(book_name)
+            yield StreamEvent(
+                kind="done",
+                text=full,
+                extra={
+                    "reason": "safety",
+                    "message": f"已连续写了{written_new}章，先停在这里，以免一直写下去。如果还要继续，再点一次即可",
+                    "outline": full,
+                    "hanzi": count_hanzi(full),
+                    "written_new": written_new,
+                },
+            )
+            return
+
+        yield StreamEvent(kind="status", message=f"正在写第{plan['next_num']}章大纲…")
+        chapter_done = None
+        async for event in generate_next_outline_chapter(
+            book_name,
+            idea=None,
+            outline=pending_outline,
+            from_chapter=from_chapter,
+            style_ids=style_ids,
+            temperature=temperature,
+            enable_thinking=enable_thinking,
+            llm_url=llm_url,
+            cancel_event=cancel_event,
+            pacing_note=plan["pacing_note"],
+            allow_ending_marker=True,
+        ):
+            pending_outline = None
+            if event.kind == "done":
+                chapter_done = event
+            elif event.kind == "error":
+                yield event
+                return
+            elif event.kind == "cancelled":
+                kept = books.read_outline(book_name) or last_outline
+                yield StreamEvent(
+                    kind="cancelled",
+                    message="已停止，已写好的大纲都保留了",
+                    text=kept,
+                    extra={"outline": kept, "written_new": written_new, "hanzi": count_hanzi(kept)},
+                )
+                return
+            else:
+                yield event
+
+        if chapter_done is None:
+            yield StreamEvent(kind="error", message="写下一章大纲时没有得到结果，已写好的大纲都保留了")
+            return
+
+        written_new += 1
+        last_outline = chapter_done.text or books.read_outline(book_name)
+        section = (chapter_done.extra or {}).get("section") or ""
+        is_ending = longform.outline_section_is_ending(section)
+        reached_cap = bool(plan["limit_num"] and plan["next_num"] >= plan["limit_num"])
+        yield StreamEvent(
+            kind="chapter",
+            text=last_outline,
+            extra={
+                "outline": last_outline,
+                "section": section,
+                "num": plan["next_num"],
+                "hanzi": count_hanzi(last_outline),
+                "is_ending": is_ending,
+                "written_new": written_new,
+            },
+        )
+        if is_ending:
+            yield StreamEvent(
+                kind="done",
+                text=last_outline,
+                extra={
+                    "reason": "ended",
+                    "message": f"这条线的大纲已经写到收尾，共追加了{written_new}章",
+                    "outline": last_outline,
+                    "hanzi": count_hanzi(last_outline),
+                    "written_new": written_new,
+                },
+            )
+            return
+        if reached_cap:
+            yield StreamEvent(
+                kind="done",
+                text=last_outline,
+                extra={
+                    "reason": "cap",
+                    "message": f"已写到目标上限，共追加了{written_new}章",
+                    "outline": last_outline,
+                    "hanzi": count_hanzi(last_outline),
+                    "written_new": written_new,
+                },
+            )
+            return
+
+
+
+def preceding_bodies_for_synopsis(book_name: str, plan: dict) -> list[dict]:
+    """Already-written chapters on this path that should be summarised before the next empty one.
+
+    Any chapter missing a synopsis is included, in path order. The immediate
+    predecessor is always included, so an edited previous chapter is reflected.
+    """
+    from app import synopsis as synopsis_store
+
+    next_id = ((plan or {}).get("next") or {}).get("id")
+    preceding: list[dict] = []
+    for item in (plan or {}).get("items") or []:
+        if next_id and item.get("id") == next_id:
+            break
+        if item.get("has_body"):
+            preceding.append(item)
+    if not preceding:
+        return []
+    needed_ids = {
+        item["id"]
+        for item in preceding
+        if not (synopsis_store.read_synopsis(book_name, item["id"]) or "").strip()
+    }
+    needed_ids.add(preceding[-1]["id"])
+    return [item for item in preceding if item["id"] in needed_ids]
+
+
+async def _refresh_synopsis_for_until(
+    *,
+    book_name: str,
+    cid: str,
+    num: int,
+    chapter_text: str | None = None,
+    temperature: float | None = None,
+    llm_url: str | None = None,
+    cancel_event=None,
+) -> AsyncIterator[StreamEvent]:
+    """Update the path synopsis without streaming its draft into the chapter body."""
+    yield StreamEvent(
+        kind="status",
+        message=f"正在根据第{num}章正文更新前情摘要…",
+        extra={"chapter": cid, "num": num},
+    )
+    async for event in refresh_path_synopsis(
+        book_name,
+        cid,
+        chapter_text=chapter_text,
+        temperature=temperature,
+        enable_thinking=False,
+        llm_url=llm_url,
+        cancel_event=cancel_event,
+    ):
+        if event.kind == "cancelled":
+            yield event
+            return
+        if event.kind == "error":
+            yield StreamEvent(
+                kind="status",
+                message=f"第{num}章摘要没有更新成功，仍继续往后写",
+                extra={"chapter": cid, "num": num},
+            )
+            return
+        if event.kind == "done":
+            yield StreamEvent(
+                kind="status",
+                message=f"第{num}章前情摘要已更新",
+                extra={"chapter": cid, "num": num},
+            )
+            return
+        if event.kind == "status":
+            extra = dict(event.extra or {})
+            extra.update({"chapter": cid, "num": num})
+            event.extra = extra
+            yield event
+
+
+async def generate_chapters_until_end(
+    book_name: str,
+    *,
+    from_chapter: str | None = None,
+    target_chapters: int | None = None,
+    target_book_chars: int | None = None,
+    style_ids: list[str] | None = None,
+    temperature: float | None = None,
+    enable_thinking: bool | None = None,
+    target_chars: int | None = None,
+    llm_url: str | None = None,
+    outline: str | None = None,
+    cancel_event=None,
+    on_chapter=None,
+) -> AsyncIterator[StreamEvent]:
+    """Write empty chapter bodies along the current branch until the line or a cap ends."""
+    books.ensure_book(book_name)
+    if outline is not None and outline.strip():
+        books.write_outline(book_name, outline.strip() + "\n")
+    if not books.read_outline(book_name).strip():
+        yield StreamEvent(kind="error", message="请先确认大纲，再分章写作")
+        return
+
+    from app.tree import get_book_tree
+
+    tree = get_book_tree(book_name)
+    if not (tree.get("nodes") or []):
+        yield StreamEvent(kind="error", message="请先确认大纲，再分章写作")
+        return
+    if tree.get("has_forks") and not from_chapter:
+        yield StreamEvent(kind="error", message="当前大纲已有分叉，请先在情节脉络中点选要继续的那条线")
+        return
+
+    written_new = 0
+    last_chapter = None
+    last_text = ""
+    prior_synopsis_ready = False
+
+    def _done(reason: str, message: str, plan: dict) -> StreamEvent:
+        return StreamEvent(
+            kind="done",
+            text=last_text,
+            extra={
+                "reason": reason,
+                "message": message,
+                "written_new": written_new,
+                "skipped": plan.get("skipped") or 0,
+                "path_hanzi": plan.get("path_hanzi") or 0,
+                "chapter": last_chapter,
+                "stopped_at_fork": bool(plan.get("stopped_at_fork")),
+            },
+        )
+
+    while True:
+        if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+            yield StreamEvent(
+                kind="cancelled",
+                message="已停止，已写好的正文都保留了",
+                text=last_text,
+                extra={"written_new": written_new, "chapter": last_chapter},
+            )
+            return
+        try:
+            plan = longform.body_until_plan(
+                book_name,
+                from_chapter=from_chapter,
+                target_chapters=target_chapters,
+                target_book_chars=target_book_chars,
+                chapter_target_chars=target_chars or (books.load_settings(book_name).get("chapter_target_chars") or 2000),
+                written_new=written_new,
+            )
+        except books.BookError as exc:
+            yield StreamEvent(kind="error", message=str(exc))
+            return
+        if plan.get("from_chapter"):
+            from_chapter = plan["from_chapter"]
+
+        if not prior_synopsis_ready:
+            prior_synopsis_ready = True
+            for item in preceding_bodies_for_synopsis(book_name, plan):
+                if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                    yield StreamEvent(
+                        kind="cancelled",
+                        message="已停止，已写好的正文都保留了",
+                        text=last_text,
+                        extra={"written_new": written_new, "chapter": last_chapter},
+                    )
+                    return
+                async for event in _refresh_synopsis_for_until(
+                    book_name=book_name,
+                    cid=item["id"],
+                    num=item["num"],
+                    temperature=temperature,
+                    llm_url=llm_url,
+                    cancel_event=cancel_event,
+                ):
+                    if event.kind == "cancelled":
+                        yield StreamEvent(
+                            kind="cancelled",
+                            message="已停止，已写好的正文都保留了",
+                            text=last_text,
+                            extra={"written_new": written_new, "chapter": last_chapter or item["id"]},
+                        )
+                        return
+                    yield event
+
+        if plan["safety_hit"]:
+            yield _done(
+                "safety",
+                f"已连续写了{written_new}章，先停在这里，以免一直写下去。如果还要继续，再点一次即可",
+                plan,
+            )
+            return
+        if plan["already_complete"] or plan["next"] is None:
+            reason = plan.get("complete_reason") or "all_written"
+            fork_note = "其他结局请点选对应的线再跑一次。" if plan.get("stopped_at_fork") else ""
+            if written_new == 0 and reason == "all_written":
+                message = "当前这条线上的章节都已有正文，没有再写。" + fork_note
+            elif written_new == 0 and reason == "chars":
+                message = "当前这条线的字数已达到目标，没有再写。" + fork_note
+            elif written_new == 0 and reason == "cap":
+                message = "当前这条线已经达到目标章数，没有再写。" + fork_note
+            elif written_new == 0 and reason == "empty_path":
+                message = "当前这条线上还没有可写的章节大纲，请先把大纲写完。"
+            elif reason == "chars":
+                message = f"已达到全书大概字数，共写了{written_new}章。" + fork_note
+            elif reason == "cap":
+                message = f"已写到目标章数，共写了{written_new}章。" + fork_note
+            elif plan.get("stopped_at_fork"):
+                message = f"已写到分叉点，共写了{written_new}章。其他结局请点选对应的线再跑一次。"
+            else:
+                message = f"这条线的正文已经按大纲写完，共写了{written_new}章。"
+            yield _done(reason, message.strip(), plan)
+            return
+
+        item = plan["next"]
+        cid = item["id"]
+        num = item["num"]
+        title = item.get("title") or f"第{num}章"
+        if longform.chapter_has_body(book_name, cid):
+            continue
+        if callable(on_chapter):
+            try:
+                on_chapter(cid)
+            except Exception:
+                logger.exception("failed to attach chapter job %s", cid)
+        yield StreamEvent(
+            kind="status",
+            message=f"正在写第{num}章正文…",
+            extra={"chapter": cid, "num": num, "title": title},
+        )
+        chapter_done = None
+        async for event in generate_chapter(
+            book_name,
+            cid,
+            mode="generate",
+            style_ids=style_ids,
+            temperature=temperature,
+            enable_thinking=enable_thinking,
+            target_chars=target_chars,
+            llm_url=llm_url,
+            outline=None,
+            chapter_text=None,
+            cancel_event=cancel_event,
+        ):
+            if event.kind == "done":
+                chapter_done = event
+            elif event.kind == "error":
+                yield event
+                return
+            elif event.kind == "cancelled":
+                kept = last_text
+                yield StreamEvent(
+                    kind="cancelled",
+                    message="已停止，已写好的正文都保留了",
+                    text=kept,
+                    extra={"written_new": written_new, "chapter": last_chapter or cid},
+                )
+                return
+            else:
+                if event.kind in {"text", "status"} and not (event.extra or {}).get("chapter"):
+                    extra = dict(event.extra or {})
+                    extra.update({"chapter": cid, "num": num, "title": title})
+                    event.extra = extra
+                yield event
+
+        if chapter_done is None or not (chapter_done.text or "").strip():
+            yield StreamEvent(kind="error", message=f"写第{num}章时没有得到结果，已写好的正文都保留了")
+            return
+
+        written_new += 1
+        last_chapter = cid
+        last_text = chapter_done.text or ""
+        extra = dict(chapter_done.extra or {})
+        extra.update(
+            {
+                "chapter": cid,
+                "num": num,
+                "title": title,
+                "hanzi": extra.get("hanzi") or count_visible_hanzi(last_text),
+                "written_new": written_new,
+                "skipped": plan.get("skipped") or 0,
+            }
+        )
+        yield StreamEvent(kind="chapter", text=last_text, extra=extra)
+        async for event in _refresh_synopsis_for_until(
+            book_name=book_name,
+            cid=cid,
+            num=num,
+            chapter_text=last_text,
+            temperature=temperature,
+            llm_url=llm_url,
+            cancel_event=cancel_event,
+        ):
+            if event.kind == "cancelled":
+                yield StreamEvent(
+                    kind="cancelled",
+                    message="已停止，已写好的正文都保留了",
+                    text=last_text,
+                    extra={"written_new": written_new, "chapter": last_chapter or cid},
+                )
+                return
+            yield event
 
 
 async def generate_this_outline_chapter(
@@ -2091,8 +2654,7 @@ async def generate_this_outline_chapter(
     temperature = settings["temperature"] if temperature is None else temperature
     enable_thinking = settings["enable_thinking"] if enable_thinking is None else enable_thinking
     llm_url = llm_url or settings["llm_url"]
-    world_text = longform.world_prompt_text(book_name)
-    world_block = f"【世界观】\n{world_text}\n\n" if world_text else ""
+    settings_block = longform.setting_prompt_blocks(book_name, chapter_id)
     existing = spec.get("outline") or ""
     path_outline = spec.get("path_outline") or ""
     old_section = spec.get("section") or ""
@@ -2111,7 +2673,7 @@ async def generate_this_outline_chapter(
     excerpts = _load_styles(
         book_name,
         ids,
-        prompt_chars_guess=len(idea_text) + len(path_outline) + len(world_text) + len(notes_text) + 800,
+        prompt_chars_guess=len(idea_text) + len(path_outline) + len(settings_block) + len(notes_text) + 800,
         output_tokens=output_tokens,
         max_total_chars=800,
     )
@@ -2120,11 +2682,11 @@ async def generate_this_outline_chapter(
         "要求：\n"
         f"1. 只输出这一章这一节，标题沿用「{heading}」。不要输出书名、故事线或其他章节。\n"
         f"2. {branch_note}\n"
-        "3. 结合思路、世界观、分叉点之前已有的大纲，以及本章的走向（若有），写清本章主要事件、冲突与章末钩子。\n"
+        "3. 结合思路、世界观、人物设定、分叉点之前已有的大纲，以及本章的走向（若有），写清本章主要事件、冲突与章末钩子。\n"
         "4. 若这一节目前是「（待补充）」或内容很短，请补写完整；若已有草稿，在其基础上充实，保留仍成立的部分。\n"
-        "5. 人物、情节保持原创；所有人物年龄 18 岁或以上。不要前言、说明或完整大纲。\n\n"
+        "5. 人物、情节保持原创；所有人物年龄 18 岁或以上。若提供了世界观或人物设定，须与之相符，不要改写这些设定本身。不要前言、说明或完整大纲。\n\n"
         f"【思路】\n{idea_text or '（无）'}\n\n"
-        f"{world_block}"
+        f"{settings_block}"
         f"{direction_block}"
         f"{notes_block}"
         f"【分叉点之前、当前这条线上已有的大纲（不得改写，只供承接）】\n{path_outline or '（无）'}\n\n"
@@ -2211,40 +2773,112 @@ async def generate_world_draft(
     temperature = settings["temperature"] if temperature is None else temperature
     enable_thinking = settings["enable_thinking"] if enable_thinking is None else enable_thinking
     llm_url = llm_url or settings["llm_url"]
-    user = (
-        "请根据下面的「思路」，为这部原创小说起草一份世界观文档。\n"
-        "要求：\n"
-        "1. 只写设定：时代背景、世界规则、重要地点、势力或社会关系、需要前后一致的禁忌与前提。\n"
-        "2. 不要写章节大纲，也不要写成故事梗概。文风简洁，便于之后写大纲和正文时对照。\n"
-        "3. 人物只在与世界设定直接相关时略提，不要展开人物小传。\n"
-        "4. 所有人物年龄 18 岁或以上。只输出世界观正文，不要前言后记。\n"
-    )
-    if current:
-        user += (
-            "5. 已有一份世界观草稿时，在其基础上整理补全，保留仍成立的设定，不要无故推翻。\n\n"
-            f"【当前世界观】\n{current}\n\n"
-        )
-    else:
-        user += "\n"
-    user += f"【思路】\n{idea_text}\n"
-    messages = [
-        {"role": "system", "content": SYSTEM_RULES},
-        {"role": "user", "content": user},
-    ]
-    max_tokens = plan_max_tokens(system_and_user(messages), target_chars=1600, enable_thinking=enable_thinking)
-    async for event in stream_chat_with_retry(
-        messages,
-        llm_url=llm_url,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        enable_thinking=enable_thinking,
-        cancel_event=cancel_event,
-    ):
-        if event.kind == "done" and event.result and event.result.content.strip():
-            books.write_world(book_name, event.result.content.strip() + "\n")
-            event.extra = {"hanzi": count_hanzi(event.result.content), "saved": "世界观.md"}
-        yield event
+    target_chars = 2000
+    accumulated = current
+    started_with = current
+    auto_round = 0
+    stall_rounds = 0
+    final_event = None
 
+    while True:
+        if auto_round == 0:
+            user = (
+                "请根据下面的「思路」，为这部原创小说起草一份完整的世界观文档。\n"
+                "要求：\n"
+                "1. 只写设定：时代背景、世界规则、重要地点、势力或社会关系、需要前后一致的禁忌与前提。\n"
+                "2. 不要写章节大纲，也不要写成故事梗概。文风简洁，便于之后写大纲和正文时对照。\n"
+                "3. 人物只在与世界设定直接相关时略提，不要展开人物小传。\n"
+                "4. 所有人物年龄 18 岁或以上。只输出世界观正文，不要前言后记。\n"
+                f"5. 请把这份设定写完整，大约 {target_chars} 字，在写完之前不要提前收束。\n"
+            )
+            if current:
+                user += (
+                    "6. 已有一份世界观草稿时，在其基础上整理补全，保留仍成立的设定，不要无故推翻。\n\n"
+                    f"【当前世界观】\n{current}\n\n"
+                )
+            else:
+                user += "\n"
+            user += f"【思路】\n{idea_text}\n"
+        else:
+            user = (
+                "下面这份世界观草稿还没写完整。请从停下的地方继续补写，把它写完整。\n"
+                "要求：\n"
+                "1. 不要重复已经写过的段落，不要另起一份，也不要重写开头。\n"
+                "2. 只补还缺的设定：时代背景、世界规则、重要地点、势力或社会关系、需要前后一致的禁忌与前提。\n"
+                "3. 不要写成章节大纲或故事梗概。所有人物年龄 18 岁或以上。只输出续写的正文。\n\n"
+                f"【思路】\n{idea_text}\n\n"
+                f"【当前世界观草稿】\n{accumulated}\n"
+            )
+            yield StreamEvent(kind="status", message="世界观还没写完，正在继续补全…")
+
+        messages = [
+            {"role": "system", "content": SYSTEM_RULES},
+            {"role": "user", "content": user},
+        ]
+        needed = target_chars if auto_round == 0 else max(target_chars - count_hanzi(accumulated), 400)
+        max_tokens = plan_max_tokens(system_and_user(messages), target_chars=needed, enable_thinking=enable_thinking)
+        done_event = None
+        before = count_hanzi(accumulated)
+        async for event in stream_chat_with_retry(
+            messages,
+            llm_url=llm_url,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            enable_thinking=enable_thinking,
+            cancel_event=cancel_event,
+        ):
+            if event.kind == "done" and event.result and event.result.content.strip():
+                chunk = event.result.content.strip()
+                if auto_round == 0:
+                    accumulated = chunk
+                else:
+                    accumulated = (accumulated.rstrip() + "\n" + chunk).strip()
+                books.write_world(book_name, accumulated + "\n")
+                done_event = event
+            elif event.kind in ("error", "cancelled"):
+                if accumulated and accumulated != started_with and event.kind == "error":
+                    yield StreamEvent(kind="status", message=f"补写中断：{event.message}。已保存目前写好的世界观。")
+                    if final_event is not None:
+                        yield final_event
+                        return
+                yield event
+                return
+            else:
+                yield event
+
+        if not done_event:
+            if accumulated:
+                kept = StreamEvent(kind="done", result=ChatResult(content=accumulated), text=accumulated)
+                kept.extra = {"hanzi": count_hanzi(accumulated), "saved": "世界观.md"}
+                yield kept
+            return
+
+        final_event = StreamEvent(kind="done", result=ChatResult(content=accumulated), text=accumulated)
+        final_event.extra = {"hanzi": count_hanzi(accumulated), "saved": "世界观.md"}
+        added = count_hanzi(accumulated) - before
+        if not should_auto_continue(accumulated, target_chars):
+            yield final_event
+            return
+
+        auto_round += 1
+        if auto_round > AUTO_CONTINUE_MAX_ROUNDS:
+            yield StreamEvent(
+                kind="status",
+                message=f"已自动续写 {AUTO_CONTINUE_MAX_ROUNDS} 轮，世界观现有 {count_hanzi(accumulated)} 字，先停在这里。可以再点一次「从思路草稿」继续补全。",
+            )
+            yield final_event
+            return
+        if auto_round > 1 and added < max(80, AUTO_CONTINUE_MIN_ADD_HANZI // 2):
+            stall_rounds += 1
+            if stall_rounds >= AUTO_CONTINUE_MAX_STALLS:
+                yield StreamEvent(
+                    kind="status",
+                    message=f"自动补写没有写出足够的新内容，世界观现有 {count_hanzi(accumulated)} 字。可以再点一次继续补全。",
+                )
+                yield final_event
+                return
+        elif auto_round > 1:
+            stall_rounds = 0
 
 
 async def generate_character_cards(
@@ -2462,7 +3096,8 @@ async def refresh_path_synopsis(
         "要求：\n"
         "1. 只概括当前这条线已经发生、对后续写作仍重要的情节与人物状态，不要写其他结局或分支。\n"
         "2. 这是给作者和模型看的备忘，不是小说正文。控制在 400 到 800 字，条理清楚。\n"
-        "3. 不要复述大段原文，不要输出标题以外的说明。只输出摘要正文。\n\n"
+        "3. 必须写清已锁定、下一章不能写反的事实：地点（谁在谁的住处、谁请谁来）、时间、在场人物，以及本章结束时的状态。\n"
+        "4. 不要复述大段原文，不要输出标题以外的说明。只输出摘要正文。\n\n"
         f"【上一份路径摘要】\n{previous_summary or '（尚无，本章之前的内容请从本章正文中归纳需要保留的前情）'}\n\n"
         f"【本章正文】\n{clipped}\n"
     )

@@ -90,6 +90,18 @@ def load_longform_blocks(
     return format_longform_blocks(world=world, characters_text=chars, synopsis_text=syn)
 
 
+def setting_prompt_blocks(name: str, chapter_id: str | None = None, *, world_max: int = 4000, character_max: int = 4000) -> str:
+    """Worldview and character cards only, for outline and planning prompts."""
+    return load_longform_blocks(
+        name,
+        chapter_id,
+        for_writing=True,
+        include_synopsis=False,
+        world_max=world_max,
+        character_max=character_max,
+    )
+
+
 def isolate_new_outline_section(generated: str, existing: str) -> str:
     """Keep only the newly written outline chapter, never replacing the current outline."""
     generated = (generated or "").strip()
@@ -498,6 +510,287 @@ def _coerce_patch(item, known: list[dict]) -> dict | None:
         "character_name": character_name,
         "chapter_id": chapter_id,
         "text": text,
+    }
+
+
+
+ENDING_MARKER = "<!-- 结局 -->"
+ENDING_MARKER_RE = re.compile(r"<!--\s*结局\s*-->")
+OUTLINE_UNTIL_SAFETY_MAX = 40
+
+
+def outline_section_is_ending(section: str) -> bool:
+    return bool(ENDING_MARKER_RE.search(section or ""))
+
+
+def ensure_ending_marker(section: str) -> str:
+    """If an ending marker is present, put the canonical marker on its own last line."""
+    text = section or ""
+    if not ENDING_MARKER_RE.search(text):
+        return text
+    cleaned = ENDING_MARKER_RE.sub("", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip()
+    return f"{cleaned}\n\n{ENDING_MARKER}\n"
+
+
+def _positive_int(value, lo: int, hi: int) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if number < lo:
+        return None
+    return min(number, hi)
+
+
+def outline_until_plan(
+    current_num: int,
+    *,
+    target_chapters: int | None = None,
+    target_book_chars: int | None = None,
+    chapter_target_chars: int = 2000,
+    written_new: int = 0,
+) -> dict:
+    """Plan the next auto-outline chapter and whether writing should stop first."""
+    current = max(0, int(current_num or 0))
+    next_num = current + 1
+    chapters_cap = _positive_int(target_chapters, 1, 200)
+    book_chars = _positive_int(target_book_chars, 1000, 20_000_000)
+    per_chapter = max(200, int(chapter_target_chars or 2000))
+    word_cap = None
+    if book_chars:
+        word_cap = max(1, (book_chars + per_chapter - 1) // per_chapter)
+    limit_num = None
+    if chapters_cap and word_cap:
+        limit_num = min(chapters_cap, word_cap)
+    elif chapters_cap:
+        limit_num = chapters_cap
+    elif word_cap:
+        limit_num = word_cap
+    already_complete = bool(limit_num and current >= limit_num)
+    safety_hit = limit_num is None and int(written_new or 0) >= OUTLINE_UNTIL_SAFETY_MAX
+    remaining = None if limit_num is None else max(0, limit_num - current)
+    if already_complete or safety_hit:
+        remaining = 0
+    parts: list[str] = []
+    if limit_num and not already_complete and not safety_hit:
+        parts.append(f"请把当前这条线安排到大约第{limit_num}章收尾。")
+        if book_chars:
+            parts.append(f"全书大约{book_chars}字，按每章约{per_chapter}字来安排篇幅。")
+        parts.append(f"现在要写的是第{next_num}章，大约还剩{max(1, remaining or 1)}章（含本章）。")
+        if remaining is not None and remaining <= 1:
+            parts.append("这是按目标安排的最后一章，请在本章把这条线的故事收束。")
+        elif remaining is not None and remaining <= 3:
+            parts.append("已经接近目标，请开始收束，不要再开很大的新情节。")
+    elif not already_complete and not safety_hit:
+        parts.append("请顺着思路一直写到故事自然收尾。若本章还不是收尾，章末留下钩子，不要提前结束。")
+    return {
+        "current_num": current,
+        "next_num": next_num,
+        "limit_num": limit_num,
+        "remaining": remaining,
+        "already_complete": already_complete,
+        "safety_hit": safety_hit,
+        "pacing_note": "".join(parts),
+    }
+
+
+BODY_UNTIL_SAFETY_MAX = OUTLINE_UNTIL_SAFETY_MAX
+
+
+def chapter_has_body(name: str, chapter_id: str) -> bool:
+    try:
+        path = books.chapter_path(name, chapter_id)
+    except BookError:
+        return False
+    if not path.exists():
+        return False
+    return bool(path.read_text(encoding="utf-8").strip())
+
+
+def branch_path_nodes(name: str, from_chapter: str | None = None) -> list[dict]:
+    """Oldest-first nodes on the current line: ancestors, the selected node, then unique children."""
+    from app.tree import find_node, get_book_tree
+
+    tree = get_book_tree(name)
+    nodes = tree.get("nodes") or []
+    if not nodes:
+        return []
+    if tree.get("has_forks") and not from_chapter:
+        raise BookError("当前大纲已有分叉，请先在情节脉络中点选要继续的那条线")
+    by_id = {item["id"]: item for item in nodes}
+    node = find_node(tree, from_chapter) if from_chapter else None
+    if from_chapter and node is None:
+        raise BookError("请先在情节脉络中点选要继续的那条线")
+    if node is None:
+        roots = [item for item in nodes if not item.get("parent_id")]
+        start = roots[0] if len(roots) == 1 else (roots[0] if roots else nodes[0])
+        # If the tree is a unique chain, start at the root and walk down.
+        node = start
+    path: list[dict] = []
+    seen: set[str] = set()
+    current = node
+    ancestors: list[dict] = []
+    while current and current.get("parent_id") and current["id"] not in seen:
+        seen.add(current["id"])
+        parent = by_id.get(current["parent_id"])
+        if not parent:
+            break
+        ancestors.append(parent)
+        current = parent
+    ancestors.reverse()
+    path.extend(ancestors)
+    if node["id"] not in {item["id"] for item in path}:
+        path.append(node)
+    current = node
+    seen = {item["id"] for item in path}
+    while current:
+        children = [cid for cid in (current.get("children") or []) if cid in by_id]
+        if len(children) != 1:
+            break
+        child = by_id[children[0]]
+        if child["id"] in seen:
+            break
+        path.append(child)
+        seen.add(child["id"])
+        current = child
+    return path
+
+
+def ensure_branch_chapter_ids(name: str, from_chapter: str | None = None) -> tuple[list[dict], str | None]:
+    """Allocate chapter files for the current line, without overwriting existing bodies."""
+    from app.tree import find_node, get_book_tree, open_tree_node
+
+    path_nodes = branch_path_nodes(name, from_chapter)
+    tree = get_book_tree(name)
+    start = find_node(tree, from_chapter) if from_chapter else None
+    start_index = start.get("outline_index") if start else None
+    resolved = None
+    ensured: list[dict] = []
+    for node in path_nodes:
+        tree = get_book_tree(name)
+        current = next(
+            (item for item in (tree.get("nodes") or []) if item.get("outline_index") == node.get("outline_index")),
+            None,
+        )
+        if current is None:
+            current = find_node(tree, node.get("chapter_id") or node.get("id"))
+        if current is None:
+            continue
+        opened = open_tree_node(name, current["id"])
+        cid = opened.get("id")
+        tree = get_book_tree(name)
+        fresh = find_node(tree, cid) if cid else None
+        if fresh is None:
+            continue
+        ensured.append(fresh)
+        if start_index is not None and fresh.get("outline_index") == start_index:
+            resolved = fresh.get("chapter_id") or fresh.get("id")
+    return ensured, resolved
+
+
+def body_until_plan(
+    name: str,
+    *,
+    from_chapter: str | None = None,
+    target_chapters: int | None = None,
+    target_book_chars: int | None = None,
+    chapter_target_chars: int = 2000,
+    written_new: int = 0,
+) -> dict:
+    """Decide which empty chapter on the current line should be written next."""
+    from app.tree import get_book_tree
+
+    path_nodes, resolved_from = ensure_branch_chapter_ids(name, from_chapter)
+    tree = get_book_tree(name)
+    by_id = {item["id"]: item for item in (tree.get("nodes") or [])}
+    last = path_nodes[-1] if path_nodes else None
+    stopped_at_fork = False
+    if last:
+        children = [cid for cid in (last.get("children") or []) if cid in by_id]
+        stopped_at_fork = len(children) > 1
+
+    items: list[dict] = []
+    path_hanzi = 0
+    for node in path_nodes:
+        raw_id = node.get("chapter_id") or ""
+        if not raw_id:
+            continue
+        try:
+            cid = books.validate_chapter_id(raw_id)
+        except BookError:
+            continue
+        has_body = chapter_has_body(name, cid)
+        hanzi = 0
+        if has_body:
+            try:
+                hanzi = int(books.read_chapter(name, cid).get("hanzi") or 0)
+            except BookError:
+                hanzi = 0
+        path_hanzi += hanzi
+        num = node.get("num")
+        try:
+            num = int(num) if num is not None else int(cid)
+        except (TypeError, ValueError):
+            num = int(cid)
+        items.append(
+            {
+                "id": cid,
+                "node_id": node.get("id"),
+                "num": num,
+                "has_body": has_body,
+                "hanzi": hanzi,
+                "title": node.get("display_title") or node.get("title") or f"第{num}章",
+            }
+        )
+
+    chapters_cap = _positive_int(target_chapters, 1, 200)
+    book_chars = _positive_int(target_book_chars, 1000, 20_000_000)
+    has_cap = chapters_cap is not None or book_chars is not None
+    chars_reached = bool(book_chars and path_hanzi >= book_chars)
+    pending: list[dict] = []
+    skipped = 0
+    for item in items:
+        if chapters_cap and item["num"] > chapters_cap:
+            continue
+        if item["has_body"]:
+            skipped += 1
+            continue
+        pending.append(item)
+    if chars_reached:
+        pending = []
+
+    safety_hit = (not has_cap) and int(written_new or 0) >= BODY_UNTIL_SAFETY_MAX
+    next_item = None if safety_hit or not pending else pending[0]
+    already_complete = next_item is None and not safety_hit
+    reason = None
+    if already_complete:
+        uncapped_empty = [item for item in items if not item["has_body"]]
+        if not items:
+            reason = "empty_path"
+        elif not uncapped_empty:
+            reason = "all_written"
+        elif chars_reached:
+            reason = "chars"
+        elif chapters_cap:
+            reason = "cap"
+        else:
+            reason = "all_written"
+    return {
+        "items": items,
+        "pending": pending,
+        "next": next_item,
+        "skipped": skipped,
+        "path_hanzi": path_hanzi,
+        "already_complete": already_complete,
+        "complete_reason": reason,
+        "safety_hit": safety_hit,
+        "stopped_at_fork": stopped_at_fork,
+        "remaining": 0 if next_item is None else len(pending),
+        "has_cap": has_cap,
+        "from_chapter": resolved_from or from_chapter,
     }
 
 

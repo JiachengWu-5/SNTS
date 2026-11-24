@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
-  <title>SHANYDOC</title>
-  <link rel="stylesheet" href="/static/style.css?v=snts1" />
+  <title>本地小说写作</title>
+  <link rel="stylesheet" href="/static/style.css?v=extractbook2" />
 </head>
 <body>
   <header class="topbar">
@@ -12,8 +12,8 @@
     <div class="brand">
       <span class="mark">卷</span>
       <div>
-        <h1>SHANYDOC</h1>
-        <p>本地小说写作 · 先定大纲，再按章续写</p>
+        <h1>本地小说写作</h1>
+        <p>先定大纲，再按章续写</p>
       </div>
     </div>
     <div class="topbar-end">
@@ -21,6 +21,7 @@
         <span class="dot"></span>
         <span class="health-text">正在检查写作模型…</span>
       </div>
+      <button type="button" class="btn small" id="btn-reload-server">重新加载服务</button>
       <button type="button" class="btn small mobile-only body-only hidden" id="btn-open-illust">插图</button>
       <button type="button" class="btn small mobile-only" id="btn-open-right">章节</button>
     </div>
@@ -69,8 +70,9 @@
           </label>
         </div>
         <div class="row" style="margin-top:8px;">
-          <input type="url" id="style-url" placeholder="或粘贴网页链接，抓取正文作为文风" />
-          <button type="button" class="btn" id="btn-fetch-style">抓取网页</button>
+          <input type="url" id="style-url" placeholder="粘贴章节、目录、Pixiv 单篇或系列链接" />
+          <button type="button" class="btn" id="btn-fetch-chapter">提取本章</button>
+          <button type="button" class="btn" id="btn-fetch-book">提取全本</button>
         </div>
         <p class="status" id="style-status"></p>
         </div>
@@ -199,14 +201,24 @@
 
       <div class="stage hidden" data-stage-panel="outline">
         <div class="toolbar">
-          <p class="lead">可以自己改大纲，也可以先点选一章写本章大纲，或按章追加下一章，或在下面写下改进思路，让模型在现有大纲上修改。改完会自动保存，确认后再按章写作。</p>
+          <p class="lead">可以自己改大纲，也可以先点选一章写本章大纲，或按章追加下一章，或一键沿当前这条线写到收尾。也可以在下面写下改进思路，让模型在现有大纲上修改。改完会自动保存，确认后再按章写作。</p>
           <div class="row">
             <button type="button" class="btn" id="btn-fill-outline">写本章大纲</button>
             <button type="button" class="btn" id="btn-next-outline">写下一章大纲</button>
+            <button type="button" class="btn" id="btn-until-outline">一键写完大纲</button>
             <button type="button" class="btn" id="btn-save-outline">保存大纲</button>
             <button type="button" class="btn" id="btn-regen-outline">从思路重新生成</button>
             <button type="button" class="btn primary" id="btn-confirm-outline">确认大纲，开始写正文</button>
           </div>
+          <div class="row">
+            <label class="field">目标章数
+              <input type="number" id="outline-target-chapters" min="1" max="200" step="1" placeholder="选填" />
+            </label>
+            <label class="field">全书大概字数
+              <input type="number" id="outline-target-book-chars" min="1000" max="20000000" step="1000" placeholder="选填" />
+            </label>
+          </div>
+          <p class="hint">「一键写完大纲」会沿情节树里当前选中的这条线一章章往下写，写到收尾或你定的上限为止。目标章数和全书大概字数都是选填，先到的先停。多结局时先点选要写的那条线；其他结局再从分叉点另跑一遍。</p>
         </div>
         <div class="extras" id="outline-extras">
           <button type="button" class="btn extras-toggle" id="btn-toggle-outline-extras" aria-expanded="false">改进思路</button>
@@ -257,6 +269,7 @@
           </div>
           <div class="row">
             <button type="button" class="btn primary" id="btn-gen-chapter">生成本章</button>
+            <button type="button" class="btn" id="btn-until-chapters">一键写完正文</button>
             <button type="button" class="btn" id="btn-continue-chapter">续写本章</button>
             <button type="button" class="btn" id="btn-expand-chapter">扩写本章</button>
             <button type="button" class="btn" id="btn-save-chapter">保存本章</button>
@@ -265,6 +278,15 @@
             <button type="button" class="btn" id="btn-restore-saved-chapter">恢复已保存的本章</button>
             <button type="button" class="btn" id="btn-delete-chapter">删除本章正文</button>
           </div>
+          <div class="row">
+            <label class="field">目标章数
+              <input type="number" id="body-target-chapters" min="1" max="200" step="1" placeholder="选填" />
+            </label>
+            <label class="field">全书大概字数
+              <input type="number" id="body-target-book-chars" min="1000" max="20000000" step="1000" placeholder="选填" />
+            </label>
+          </div>
+          <p class="hint">「一键写完正文」会沿情节树里当前选中的这条线，按大纲顺序补还没有正文的章，已有正文的一律跳过，写到这条线结束或你定的上限为止。目标章数和全书大概字数都是选填，先到的先停。多结局时先点选要写的那条线；其他结局再从分叉点另跑一遍。</p>
         </div>
         <div class="extras" id="chapter-extras">
           <button type="button" class="btn extras-toggle" id="btn-toggle-chapter-extras" aria-expanded="false">改进意见</button>
@@ -405,6 +427,6 @@
     </div>
   </div>
   <div class="toast hidden" id="toast"></div>
-  <script src="/static/app.js?v=snts1"></script>
+  <script src="/static/app.js?v=extractbook2"></script>
 </body>
 </html>

@@ -175,6 +175,30 @@ function applyLeftSections() {
   });
 }
 
+
+const LAST_OPEN_KEY = "snts-last-open";
+
+function loadLastOpen() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAST_OPEN_KEY) || "{}") || {};
+    const chapters = (raw.chapters && typeof raw.chapters === "object" && !Array.isArray(raw.chapters)) ? raw.chapters : {};
+    return {
+      book: typeof raw.book === "string" ? raw.book : "",
+      chapters,
+    };
+  } catch (err) {
+    return { book: "", chapters: {} };
+  }
+}
+
+function rememberOpen(book, chapterId) {
+  if (!book) return;
+  const saved = loadLastOpen();
+  saved.book = book;
+  if (chapterId) saved.chapters[book] = String(chapterId);
+  try { localStorage.setItem(LAST_OPEN_KEY, JSON.stringify(saved)); } catch (err) { /* ignore */ }
+}
+
 let timelinePreview = null;
 
 function timelineScope() {
@@ -450,6 +474,76 @@ async function api(path, options = {}) {
   return data;
 }
 
+
+async function waitForServerReload(previousStartedAt) {
+  const deadline = Date.now() + 45000;
+  let sawDown = false;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch("/api/health", { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        if (sawDown) return true;
+        if (previousStartedAt && data.started_at && data.started_at !== previousStartedAt) return true;
+      } else {
+        sawDown = true;
+      }
+    } catch (_) {
+      sawDown = true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  try {
+    const res = await fetch("/api/health", { cache: "no-store" });
+    return res.ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+function reloadErrorMessage(data, fallback) {
+  if (!data) return fallback;
+  if (typeof data.detail === "string" && data.detail.trim()) return data.detail;
+  if (typeof data.message === "string" && data.message.trim()) return data.message;
+  return fallback;
+}
+
+async function reloadWriterService() {
+  if (state.generating || state.illustSession) {
+    return toast("正在生成中，请先等当前任务结束，或点停止后再重新加载", true);
+  }
+  const ok = window.confirm("确定重新加载写作服务吗？页面随后会自动刷新。正在生成或出图时不会加载。");
+  if (!ok) return;
+  let previousStartedAt = null;
+  try {
+    const health = await fetch("/api/health", { cache: "no-store" });
+    if (health.ok) {
+      const data = await health.json();
+      previousStartedAt = data.started_at || null;
+    }
+  } catch (_) {}
+  try {
+    const res = await fetch("/api/server/reload", { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      throw new Error(reloadErrorMessage(data, "现在不能重新加载"));
+    }
+  } catch (err) {
+    return toast(err.message, true);
+  }
+  const box = $("health");
+  if (box && box.querySelector(".health-text")) {
+    box.querySelector(".health-text").textContent = "正在重新加载写作服务…";
+  }
+  toast("正在重新加载写作服务…");
+  const ready = await waitForServerReload(previousStartedAt);
+  if (ready) {
+    window.location.replace(`/?r=${Date.now()}`);
+  } else {
+    toast("重新加载超时，请稍后再试，或手动重新打开写作服务", true);
+  }
+}
+
 async function refreshHealth() {
   const box = $("health");
   try {
@@ -512,8 +606,10 @@ async function selectBook(name) {
   renderChapters(data.chapters || []);
   renderPlotTrees();
   updateChapterPath();
+  rememberOpen(name);
   if ((data.chapters || []).length) {
-    const current = data.chapters.find((c) => c.id === state.chapterId) || data.chapters[0];
+    const preferred = loadLastOpen().chapters[name];
+    const current = data.chapters.find((c) => String(c.id) === String(preferred)) || data.chapters[0];
     await openChapter(current.id);
   } else {
     state.chapterId = null;
@@ -723,6 +819,7 @@ async function putOutlineSafely() {
   });
   state.synced = state.synced || {};
   state.synced.outline = text;
+  if (state.allowEmptySave) state.allowEmptySave.outline = false;
   if (saved && saved.tree) applyTree(saved.tree);
   return saved;
 }
@@ -1264,6 +1361,7 @@ async function openChapter(id) {
 function applyOpenedChapter(data, node) {
   state.chapterId = data.id;
   state.treeNodeId = (data.node && data.node.id) || (node && node.id) || data.id;
+  if (state.book && state.book.name) rememberOpen(state.book.name, data.id);
   const live = sameChapter(state.generatingChapterId, data.id) || (node && sameChapter(state.generatingChapterId, node.id));
   $("chapter-editor").value = live ? (state.genDraft || "") : (data.text || "");
   $("chapter-title").textContent = data.title || (node && (node.display_title || node.file_title)) || `第${Number(data.id)}章`;
@@ -1271,15 +1369,45 @@ function applyOpenedChapter(data, node) {
   loadIllustrations();
 }
 
+function latestTreeNode(node) {
+  if (!node) return null;
+  const byId = findTreeNode(node.chapter_id || node.id);
+  if (byId) return byId;
+  if (node.outline_index != null) {
+    const byIndex = treeNodes().find((item) => item.outline_index === node.outline_index);
+    if (byIndex) return byIndex;
+  }
+  return node;
+}
+
+function treeNodeOpenId(node) {
+  if (!node) return "";
+  return String(node.chapter_id || node.id || "");
+}
+
 async function openTreeNode(node, options = {}) {
   if (!state.book || !node) return;
   await flushSaves();
+  const openById = (id) => api(`/api/books/${encodeURIComponent(state.book.name)}/tree/nodes/${encodeURIComponent(id)}/open`, {
+    method: "POST",
+  });
   try {
-    const data = await api(`/api/books/${encodeURIComponent(state.book.name)}/tree/nodes/${encodeURIComponent(node.id)}/open`, {
-      method: "POST",
-    });
+    let current = latestTreeNode(node);
+    let openId = treeNodeOpenId(current);
+    if (!openId) return;
+    let data;
+    try {
+      data = await openById(openId);
+    } catch (err) {
+      if (!String(err.message || "").includes("找不到该节点")) throw err;
+      await reloadBookMeta();
+      current = latestTreeNode(node);
+      openId = treeNodeOpenId(current);
+      if (!openId) throw err;
+      data = await openById(openId);
+    }
     if (data.tree) applyTree(data.tree);
-    applyOpenedChapter(data, node);
+    applyOpenedChapter(data, current);
     renderChapters((state.bookData && state.bookData.chapters) || []);
     updateCounts();
     updateChapterPath();
@@ -1588,7 +1716,7 @@ function setGenerating(on, label) {
 
 function applyActionLocks() {
   const writingLocked = !!(state.generating || state.illustSession);
-  ["btn-gen-outline", "btn-regen-outline", "btn-revise-outline", "btn-restore-outline", "btn-save-outline", "btn-fill-outline", "btn-next-outline", "btn-draft-world", "btn-gen-world", "btn-gen-characters", "btn-gen-chapter", "btn-continue-chapter", "btn-expand-chapter", "btn-revise-chapter", "btn-restore-chapter", "btn-save-chapter", "btn-check-consistency", "btn-restore-saved-chapter", "btn-delete-chapter", "btn-tree-open", "btn-tree-branch", "btn-tree-delete", "btn-list-branch", "btn-add-character"].forEach((id) => {
+  ["btn-reload-server", "btn-gen-outline", "btn-regen-outline", "btn-revise-outline", "btn-restore-outline", "btn-save-outline", "btn-fill-outline", "btn-next-outline", "btn-until-outline", "btn-draft-world", "btn-gen-world", "btn-gen-characters", "btn-gen-chapter", "btn-until-chapters", "btn-continue-chapter", "btn-expand-chapter", "btn-revise-chapter", "btn-restore-chapter", "btn-save-chapter", "btn-check-consistency", "btn-restore-saved-chapter", "btn-delete-chapter", "btn-tree-open", "btn-tree-branch", "btn-tree-delete", "btn-list-branch", "btn-add-character"].forEach((id) => {
     if ($(id)) $(id).disabled = writingLocked;
   });
   if ($("btn-illust-passage")) $("btn-illust-passage").disabled = !!state.generating;
@@ -1650,6 +1778,8 @@ async function runGeneration(url, body, targetEditor, afterDone, options = {}) {
           outline: "正在生成大纲…",
           "outline-next": "正在写下一章大纲…",
           "outline-section": "正在写本章大纲…",
+          "outline-until": "正在一键写完大纲…",
+          "chapters-until": "正在一键写完正文…",
           world: "正在起草世界观…",
           consistency: "正在检查一致性…",
           synopsis: "正在更新本章摘要…",
@@ -2013,15 +2143,21 @@ async function stopGeneration() {
 }
 
 
-function clearEditor(id, label, shouldConfirm) {
+async function clearEditor(id, label, shouldConfirm) {
   const el = $(id);
   if (!el) return;
   if (!el.value) return;
   if (state.generating) return toast("正在生成，请等结束后再清空", true);
   if (shouldConfirm && !confirm(`确定清空「${label}」吗？清空后会保存为空。`)) return;
+  const key = { "outline-editor": "outline", "world-editor": "world", "idea-editor": "idea" }[id];
+  if (key) {
+    state.allowEmptySave = state.allowEmptySave || {};
+    state.allowEmptySave[key] = true;
+  }
   el.value = "";
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.focus();
+  await flushSaves();
 }
 
 
@@ -2382,6 +2518,311 @@ async function generateNextOutlineChapter() {
     },
     { targetChars: 800, keepPrefix: !!existing.trim(), label: "正在写下一章大纲…" }
   );
+}
+
+
+
+function readOptionalCaps() {
+  const bodyChapters = $("body-target-chapters") && $("body-target-chapters").value;
+  const bodyChars = $("body-target-book-chars") && $("body-target-book-chars").value;
+  const outlineChapters = $("outline-target-chapters") && $("outline-target-chapters").value;
+  const outlineChars = $("outline-target-book-chars") && $("outline-target-book-chars").value;
+  const chaptersRaw = bodyChapters || outlineChapters;
+  const charsRaw = bodyChars || outlineChars;
+  const targetChapters = chaptersRaw ? Number(chaptersRaw) : null;
+  const targetBookChars = charsRaw ? Number(charsRaw) : null;
+  return {
+    target_chapters: Number.isFinite(targetChapters) && targetChapters >= 1 ? Math.floor(targetChapters) : null,
+    target_book_chars: Number.isFinite(targetBookChars) && targetBookChars >= 1000 ? Math.floor(targetBookChars) : null,
+  };
+}
+
+async function generateChaptersUntilEnd() {
+  if (!state.book) return toast("请先选择或新建一本书", true);
+  await flushSaves();
+  try {
+    await api(`/api/books/${encodeURIComponent(state.book.name)}/idea`, {
+      method: "PUT",
+      body: JSON.stringify({ text: $("idea-editor").value }),
+    });
+    await saveWorldNow();
+    await putOutlineSafely();
+  } catch (err) {
+    return toast(err.message, true);
+  }
+  setStage("body");
+  const node = selectedTreeNode();
+  const fromChapter = node ? (node.chapter_id || node.id) : null;
+  const caps = readOptionalCaps();
+  if (state.generating) return;
+  let acc = "";
+  let currentId = null;
+  state.abort = new AbortController();
+  state.generatingChapterId = null;
+  state.genDraft = "";
+  const editor = $("chapter-editor");
+  const writeGen = (text) => {
+    if (currentId) state.genDraft = text;
+    if (viewingGenEditor(editor, currentId)) {
+      editor.value = text;
+      updateCounts();
+    }
+  };
+  const showChapter = async (chapterId) => {
+    if (!chapterId) return;
+    currentId = chapterId;
+    state.generatingChapterId = chapterId;
+    acc = "";
+    state.genDraft = "";
+    if (!sameChapter(state.chapterId, chapterId)) {
+      await openChapter(chapterId);
+    } else if (editor) {
+      editor.value = "";
+      updateCounts();
+    }
+  };
+  stopProgressTicker();
+  state.progress = {
+    startedAt: Date.now(),
+    firstTextAt: null,
+    written: 0,
+    target: Math.max(200, Number($("param-chars").value) || 2000),
+    thinking: !!$("param-thinking").checked,
+    label: "正在一键写完正文…",
+  };
+  setGenerating(true, "正在一键写完正文…");
+  renderProgress();
+  state.progressTimer = setInterval(renderProgress, 1000);
+  let finishedReason = "";
+  try {
+    const res = await fetch(`/api/books/${encodeURIComponent(state.book.name)}/generate/chapters-until`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from_chapter: fromChapter,
+        target_chapters: caps.target_chapters,
+        target_book_chars: caps.target_book_chars,
+        style_ids: Array.from(state.selected),
+        temperature: Number($("param-temp").value),
+        enable_thinking: $("param-thinking").checked,
+        target_chars: Math.max(200, Number($("param-chars").value) || 2000),
+        llm_url: $("param-url").value.trim(),
+        outline: $("outline-editor").value,
+      }),
+      signal: state.abort.signal,
+    });
+    await readSSE(res, {
+      meta: (p) => {
+        state.jobId = p.job_id;
+        if (!state.progress) return;
+        state.progress.label = "正在一键写完正文…";
+        renderProgress();
+      },
+      status: async (p) => {
+        await reloadBookMeta();
+        if (p.chapter) await showChapter(p.chapter);
+        if (!state.progress) return;
+        const message = p.message || "正在一键写完正文…";
+        state.progress.label = message;
+        if (message.includes("思考")) state.progress.thinking = true;
+        renderProgress();
+      },
+      text: (p) => {
+        acc += p.text || "";
+        writeGen(acc);
+        if (!state.progress) return;
+        if (!state.progress.firstTextAt) state.progress.firstTextAt = Date.now();
+        state.progress.written = hanzi(acc);
+        state.progress.thinking = false;
+        renderProgress();
+      },
+      chapter: async (p) => {
+        const cid = p.chapter || currentId;
+        if (cid) {
+          currentId = cid;
+          state.generatingChapterId = cid;
+        }
+        const full = p.text || acc;
+        writeGen(full);
+        acc = "";
+        state.genDraft = full;
+        if (state.progress) {
+          state.progress.label = p.num ? `第${p.num}章已写好，继续往下写…` : "一章正文已写好，继续往下写…";
+          state.progress.written = p.hanzi || hanzi(full);
+          renderProgress();
+        }
+        await reloadBookMeta();
+        await loadTimeline();
+        if (sameChapter(state.chapterId, cid)) await maybeRefreshSynopsis(cid, full);
+      },
+      done: async (p) => {
+        finishedReason = p.reason || "";
+        if (p.text && currentId) writeGen(p.text);
+        toast(p.message || "这条线的正文已经按大纲写完");
+        await reloadBookMeta();
+        await loadTimeline();
+      },
+      error: (p) => {
+        throw new Error(p.message || "一键写完正文失败，已写好的部分都保留了");
+      },
+      cancelled: async (p) => {
+        if (p.text && currentId) writeGen(p.text);
+        toast(p.message || "已停止，已写好的正文都保留了");
+        await reloadBookMeta();
+        await loadTimeline();
+      },
+    });
+  } catch (err) {
+    if (err.name !== "AbortError") toast(err.message, true);
+  } finally {
+    setGenerating(false);
+    state.abort = null;
+    state.jobId = null;
+    state.generatingChapterId = null;
+    state.genDraft = "";
+  }
+  return finishedReason;
+}
+
+async function generateOutlineUntilEnd() {
+  if (!state.book) return toast("请先选择或新建一本书", true);
+  await flushSaves();
+  try {
+    await api(`/api/books/${encodeURIComponent(state.book.name)}/idea`, {
+      method: "PUT",
+      body: JSON.stringify({ text: $("idea-editor").value }),
+    });
+    await saveWorldNow();
+    await putOutlineSafely();
+  } catch (err) {
+    return toast(err.message, true);
+  }
+  setStage("outline");
+  const node = selectedTreeNode();
+  const fromChapter = node ? (node.chapter_id || node.id) : null;
+  const existing = $("outline-editor").value;
+  const targetChaptersRaw = $("outline-target-chapters") && $("outline-target-chapters").value;
+  const targetBookRaw = $("outline-target-book-chars") && $("outline-target-book-chars").value;
+  const targetChapters = targetChaptersRaw ? Number(targetChaptersRaw) : null;
+  const targetBookChars = targetBookRaw ? Number(targetBookRaw) : null;
+  if (state.generating) return;
+  let prefix = existing.trim() ? existing.replace(/\s+$/, "") + "\n\n" : "";
+  let acc = "";
+  let lastSaved = existing;
+  state.abort = new AbortController();
+  state.generatingChapterId = null;
+  state.genDraft = "";
+  const editor = $("outline-editor");
+  const writeGen = (text) => {
+    editor.value = text;
+    state.synced = state.synced || {};
+    updateCounts();
+  };
+  const acceptOutline = (full) => {
+    if (!full) return;
+    lastSaved = full;
+    prefix = full.replace(/\s+$/, "") + "\n\n";
+    acc = "";
+    writeGen(full);
+    state.synced.outline = full;
+  };
+  stopProgressTicker();
+  state.progress = {
+    startedAt: Date.now(),
+    firstTextAt: null,
+    written: hanzi(existing),
+    target: 0,
+    thinking: !!$("param-thinking").checked,
+    label: "正在一键写完大纲…",
+  };
+  setGenerating(true, "正在一键写完大纲…");
+  renderProgress();
+  state.progressTimer = setInterval(renderProgress, 1000);
+  let finishedReason = "";
+  try {
+    const res = await fetch(`/api/books/${encodeURIComponent(state.book.name)}/generate/outline-until`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        idea: $("idea-editor").value,
+        outline: existing,
+        from_chapter: fromChapter,
+        target_chapters: Number.isFinite(targetChapters) && targetChapters >= 1 ? Math.floor(targetChapters) : null,
+        target_book_chars: Number.isFinite(targetBookChars) && targetBookChars >= 1000 ? Math.floor(targetBookChars) : null,
+        style_ids: Array.from(state.selected),
+        temperature: Number($("param-temp").value),
+        enable_thinking: $("param-thinking").checked,
+        llm_url: $("param-url").value.trim(),
+      }),
+      signal: state.abort.signal,
+    });
+    await readSSE(res, {
+      meta: (p) => {
+        state.jobId = p.job_id;
+        if (!state.progress) return;
+        state.progress.label = "正在一键写完大纲…";
+        renderProgress();
+      },
+      status: (p) => {
+        if (!state.progress) return;
+        const message = p.message || "正在一键写完大纲…";
+        state.progress.label = message;
+        if (message.includes("思考")) state.progress.thinking = true;
+        renderProgress();
+      },
+      text: (p) => {
+        acc += p.text || "";
+        writeGen(prefix + acc);
+        if (!state.progress) return;
+        if (!state.progress.firstTextAt) state.progress.firstTextAt = Date.now();
+        state.progress.written = hanzi(prefix + acc);
+        state.progress.thinking = false;
+        renderProgress();
+      },
+      chapter: async (p) => {
+        const full = p.outline || p.text || lastSaved;
+        acceptOutline(full);
+        if (state.progress) {
+          state.progress.label = p.num ? `第${p.num}章大纲已写好，继续往下写…` : "一章大纲已写好，继续往下写…";
+          state.progress.written = hanzi(full);
+          renderProgress();
+        }
+        await reloadBookMeta();
+        await loadTimeline();
+      },
+      done: async (p) => {
+        const full = p.outline || p.text || lastSaved;
+        acceptOutline(full);
+        finishedReason = p.reason || "";
+        toast(p.message || `这条线的大纲已经写完，共 ${p.hanzi || hanzi(full)} 字`);
+        await reloadBookMeta();
+        await loadTimeline();
+      },
+      error: (p) => {
+        writeGen(lastSaved);
+        state.synced = state.synced || {};
+        state.synced.outline = lastSaved;
+        throw new Error(p.message || "一键写完大纲失败，已写好的部分都保留了");
+      },
+      cancelled: async (p) => {
+        const full = p.outline || p.text || lastSaved;
+        acceptOutline(full);
+        toast(p.message || "已停止，已写好的大纲都保留了");
+        await reloadBookMeta();
+        await loadTimeline();
+      },
+    });
+  } catch (err) {
+    if (err.name !== "AbortError") toast(err.message, true);
+    writeGen(lastSaved);
+  } finally {
+    setGenerating(false);
+    state.abort = null;
+    state.jobId = null;
+    state.generatingChapterId = null;
+    state.genDraft = "";
+  }
+  return finishedReason;
 }
 
 async function loadSynopsis() {
@@ -2955,6 +3396,9 @@ function bind() {
   $("btn-regen-outline").addEventListener("click", generateOutline);
   $("btn-fill-outline").addEventListener("click", generateThisOutlineChapter);
   $("btn-next-outline").addEventListener("click", generateNextOutlineChapter);
+  $("btn-until-outline").addEventListener("click", generateOutlineUntilEnd);
+  $("btn-until-chapters").addEventListener("click", generateChaptersUntilEnd);
+  if ($("btn-reload-server")) $("btn-reload-server").addEventListener("click", reloadWriterService);
   $("btn-draft-world").addEventListener("click", generateWorldDraft);
   if ($("btn-gen-world")) $("btn-gen-world").addEventListener("click", generateWorldDraft);
   if ($("btn-gen-characters")) $("btn-gen-characters").addEventListener("click", generateCharacters);
@@ -3133,28 +3577,129 @@ function bind() {
   });
 
 
-  $("btn-fetch-style").addEventListener("click", async () => {
-    if (!state.book) return toast("请先选择作品", true);
-    const url = $("style-url").value.trim();
-    if (!url) return toast("请粘贴网页链接", true);
-    $("style-status").textContent = "正在抓取网页…";
+  async function fetchChapterStyle(url, force = false) {
+    const response = await fetch(`/api/books/${encodeURIComponent(state.book.name)}/styles/from-url`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, force }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 409 && data && data.detail) {
+      const detail = data.detail;
+      const message = (detail && (detail.message || detail.name))
+        ? (detail.message || `文风样本「${detail.name}」已存在，要覆盖吗？`)
+        : "文风样本已存在，要覆盖吗？";
+      const ok = window.confirm(typeof message === "string" ? message : "文风样本已存在，要覆盖吗？");
+      if (!ok) {
+        $("style-status").textContent = "已取消，未覆盖已有文件";
+        $("style-status").classList.remove("error");
+        return;
+      }
+      await fetchChapterStyle(url, true);
+      return;
+    }
+    if (!response.ok) throw new Error(apiErrorMessage(data, response.status));
+    $("style-url").value = "";
+    if (data.id) state.selected.add(data.id);
+    $("style-status").textContent = `已提取本章：${data.name}（${data.hanzi || 0} 字）`;
     $("style-status").classList.remove("error");
-    try {
-      const data = await api(`/api/books/${encodeURIComponent(state.book.name)}/styles/from-url`, {
-        method: "POST",
-        body: JSON.stringify({ url }),
-      });
-      $("style-url").value = "";
-      state.selected.add(data.id);
-      $("style-status").textContent = `已抓取 ${data.name}`;
-      $("style-status").classList.remove("error");
+    await loadStyles();
+    scheduleSave("settings", saveSettings, 200);
+  }
+
+  async function fetchBookStyle(url, force = false) {
+    const response = await fetch(`/api/books/${encodeURIComponent(state.book.name)}/styles/from-book-url`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, force }),
+    });
+    let finished = false;
+    let existed = null;
+    await readSSE(response, {
+      status: (payload) => {
+        $("style-status").textContent = payload.message || "正在抓取全本…";
+        $("style-status").classList.remove("error");
+      },
+      exists: (payload) => {
+        existed = payload;
+      },
+      error: (payload) => {
+        finished = true;
+        $("style-status").textContent = payload.message || "抓取全本失败";
+        $("style-status").classList.add("error");
+        toast(payload.message || "抓取全本失败", true);
+      },
+      done: (payload) => {
+        finished = true;
+        if (payload.id) state.selected.add(payload.id);
+        const chapters = payload.chapters ? `${payload.chapters} 章，` : "";
+        $("style-status").textContent = `已提取全本：${payload.name}（${chapters}${payload.hanzi || 0} 字）`;
+        $("style-status").classList.remove("error");
+        $("style-url").value = "";
+      },
+    });
+    if (existed) {
+      const ok = window.confirm(existed.message || `文风样本「${existed.name}」已存在，要覆盖吗？`);
+      if (!ok) {
+        $("style-status").textContent = "已取消，未覆盖已有文件";
+        $("style-status").classList.remove("error");
+        return;
+      }
+      $("style-status").textContent = "正在覆盖已有全本…";
+      await fetchBookStyle(url, true);
+      return;
+    }
+    if (finished) {
       await loadStyles();
       scheduleSave("settings", saveSettings, 200);
-    } catch (err) {
-      $("style-status").textContent = err.message;
-      $("style-status").classList.add("error");
     }
-  });
+  }
+
+  const btnFetchChapter = $("btn-fetch-chapter") || $("btn-fetch-style");
+  if (btnFetchChapter) {
+    btnFetchChapter.addEventListener("click", async () => {
+      if (!state.book) return toast("请先选择作品", true);
+      const url = $("style-url").value.trim();
+      if (!url) return toast("请粘贴网页链接", true);
+      btnFetchChapter.disabled = true;
+      const btnBook = $("btn-fetch-book");
+      if (btnBook) btnBook.disabled = true;
+      $("style-status").textContent = "正在提取本章…";
+      $("style-status").classList.remove("error");
+      try {
+        await fetchChapterStyle(url);
+      } catch (err) {
+        $("style-status").textContent = err.message;
+        $("style-status").classList.add("error");
+      } finally {
+        btnFetchChapter.disabled = false;
+        if (btnBook) btnBook.disabled = false;
+      }
+    });
+  }
+
+  const btnFetchBook = $("btn-fetch-book");
+  if (btnFetchBook) {
+    btnFetchBook.addEventListener("click", async () => {
+      if (!state.book) return toast("请先选择作品", true);
+      const url = $("style-url").value.trim();
+      if (!url) return toast("请粘贴网页链接", true);
+      const btnChapter = $("btn-fetch-chapter") || $("btn-fetch-style");
+      btnFetchBook.disabled = true;
+      if (btnChapter) btnChapter.disabled = true;
+      $("style-status").textContent = "正在提取全本…";
+      $("style-status").classList.remove("error");
+      try {
+        await fetchBookStyle(url, false);
+      } catch (err) {
+        $("style-status").textContent = err.message;
+        $("style-status").classList.add("error");
+      } finally {
+        btnFetchBook.disabled = false;
+        if (btnChapter) btnChapter.disabled = false;
+      }
+    });
+  }
 
   $("btn-add-chapter").addEventListener("click", async () => {
     if (!state.book) return toast("请先选择作品", true);
@@ -3195,8 +3740,10 @@ async function boot() {
   setInterval(refreshHealth, 15000);
   try {
     await loadBooks();
-    const first = document.querySelector(".book-list li[data-name]");
-    if (first) await selectBook(first.dataset.name);
+    const last = loadLastOpen();
+    const items = Array.from(document.querySelectorAll(".book-list li[data-name]"));
+    const preferred = items.find((li) => li.dataset.name === last.book) || items[0];
+    if (preferred) await selectBook(preferred.dataset.name);
   } catch (err) {
     toast(err.message, true);
   }

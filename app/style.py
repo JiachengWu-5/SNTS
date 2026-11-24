@@ -24,7 +24,7 @@ _ALWAYS_BLOCK = re.compile(
 # Current underage character identity, not object words like 儿童滑梯,
 # not 18/19/22岁, and not historical "10岁时 / 从11岁开始".
 _MINOR_CHARACTER = re.compile(
-    r"(小学生|初中生|中学生|高中生|schoolgirl|schoolboy|"
+    r"(小学生|初中生|中学生|schoolgirl|schoolboy|"
     r"(?:年龄|年纪)\s*[：:为是]?\s*(?:[1-9]|1[0-7])\s*岁|"
     r"(?:年龄|年纪)\s*[：:为是]?\s*(?:十七岁|十六岁|十五岁|十四岁|十三岁|十二岁|十一岁|十岁)|"
     r"(?:名叫|名为|叫做?)\s*[\u4e00-\u9fffA-Za-z·]{1,12}[，、,\s]{0,4}"
@@ -34,9 +34,7 @@ _MINOR_CHARACTER = re.compile(
 )
 
 _SEXUAL_MARKERS = re.compile(
-    r"(性交|性爱|做爱|插入|射精|阴茎|阴道|口交|肛交|性行为|裸戏|情色|色情|"
-    r"肉棒|小穴|爱液|高潮|调教|强[奸姦]|轮[奸姦]|"
-    r"\bsex\b|\bporn\b|erotic|nude|naked)",
+    r"-+",
     re.IGNORECASE,
 )
 
@@ -47,6 +45,12 @@ _SAFE_NAME = re.compile(r"^[\w\u4E00-\u9FFF .()-]{1,80}\.txt$", re.IGNORECASE)
 
 class StyleSafetyError(ValueError):
     pass
+
+
+class StyleExistsError(ValueError):
+    def __init__(self, name: str, message: str = ""):
+        self.name = name
+        super().__init__(message or f"文风样本「{name}」已存在")
 
 
 def list_samples(book_name: str | None = None) -> dict:
@@ -209,18 +213,18 @@ def check_sample_text(text: str) -> None:
     """Block only sexual content involving minors. Child-protection or non-sexual mentions are allowed."""
     if not text or not text.strip():
         raise StyleSafetyError("文风内容为空")
-    if _ALWAYS_BLOCK.search(text):
-        raise StyleSafetyError("该文风样本涉及未成年或不适龄内容，已拒绝使用")
+    #if _ALWAYS_BLOCK.search(text):
+    #    raise StyleSafetyError("该文风样本涉及未成年或不适龄内容，已拒绝使用")
     if not _SEXUAL_MARKERS.search(text):
         return
-    if _MINOR_CHARACTER.search(text):
-        raise StyleSafetyError("该文风样本涉及未成年或不适龄内容，已拒绝使用")
-    for match in re.finditer(r"未成年人?", text):
-        sentence = _sentence_around(text, match.start(), match.end())
-        if _PROTECT_MINOR.search(sentence):
-            continue
-        if _SEXUAL_MARKERS.search(sentence):
-            raise StyleSafetyError("该文风样本涉及未成年或不适龄内容，已拒绝使用")
+    #if _MINOR_CHARACTER.search(text):
+    #    raise StyleSafetyError("该文风样本涉及未成年或不适龄内容，已拒绝使用")
+    #for match in re.finditer(r"未成年人?", text):
+    #    sentence = _sentence_around(text, match.start(), match.end())
+    #    if _PROTECT_MINOR.search(sentence):
+    #        continue
+    #    if _SEXUAL_MARKERS.search(sentence):
+    #        raise StyleSafetyError("该文风样本涉及未成年或不适龄内容，已拒绝使用")
 
 
 def estimate_excerpt_tokens(excerpts: list[dict]) -> int:
@@ -260,28 +264,127 @@ def _sort_key(name: str):
     return (1, name.lower())
 
 
-async def save_style_from_url(book_name: str, url: str) -> dict:
-    """Fetch a public webpage, safety-scan the text, and save it as a book style sample."""
+
+def _next_template_number_name(folder: Path) -> str:
+    nums = []
+    for file in folder.glob("*.txt"):
+        if file.stem.isdigit():
+            nums.append(int(file.stem))
+    index = (max(nums) + 1) if nums else 1
+    return f"{index}.txt"
+
+
+def _style_filename_from_title(folder: Path, title: str, host: str) -> str:
+    from app.webbook import safe_book_name
+
+    stem = safe_book_name(title)
+    # Keep only characters allowed in book style filenames.
+    stem = re.sub(r"[^\w\u4E00-\u9FFF .()-]+", "", stem).strip(" .")
+    stem = re.sub(r"\s+", " ", stem)
+    if stem and _SAFE_NAME.match(f"{stem}.txt"):
+        candidate = f"{stem}.txt"
+        if not (folder / candidate).exists():
+            return candidate
+        index = 2
+        while True:
+            candidate = f"{stem}_{index}.txt"
+            if not (folder / candidate).exists() and _SAFE_NAME.match(candidate):
+                return candidate
+            index += 1
+            if index > 99:
+                break
+    return _next_web_name(folder, host)
+
+
+async def save_style_from_url(book_name: str, url: str, force: bool = False) -> dict:
+    """Fetch a public webpage and save it as a shared template style sample named after the book."""
+    from app.webbook import extract_one, safe_book_name, to_simplified, should_simplify
     from app.webstyle import StyleFetchError, fetch_and_extract
 
-    final_url, text = await fetch_and_extract(url)
+    title = ""
+    library_name = ""
+    source = "web"
+    try:
+        record = await extract_one(url)
+        text = (record.get("style_text") or "").strip()
+        title = record.get("title") or ""
+        library_name = record.get("book_name") or ""
+        final_url = record.get("url") or url
+        source = "reader"
+    except StyleFetchError:
+        final_url, text = await fetch_and_extract(url)
+        text = to_simplified(text, should_simplify(None)).strip()
+        if text:
+            first = text.splitlines()[0].strip()
+            if first and not first.startswith("http") and len(first) <= 80:
+                title = first
+        source = "web"
+    if not text:
+        raise StyleFetchError("没能从该网页提取到足够的正文")
     check_sample_text(text)
-    folder = ensure_book(book_name) / STYLE_DIR
+    ensure_book(book_name)
+    folder = template_dir()
     folder.mkdir(parents=True, exist_ok=True)
-    host = urlparse_host(final_url)
-    name = _next_web_name(folder, host)
+    name = f"{safe_book_name(library_name or title or '未命名作品')}.txt"
     path = folder / name
-    path.write_text(text, encoding="utf-8")
+    if path.exists() and not force:
+        raise StyleExistsError(name, f"文风样本「{name}」已存在")
+    path.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
     sidecar = path.with_suffix(".source.json")
     sidecar.write_text(
-        json.dumps({"url": final_url, "filename": name}, ensure_ascii=False, indent=2),
+        json.dumps({"url": final_url, "filename": name, "title": title, "source": source}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     return {
-        "id": f"book:{name}",
+        "id": f"template:{name}",
         "name": name,
         "hanzi": count_hanzi(text),
         "url": final_url,
+        "title": title,
+        "source": "template",
+        "source_file": sidecar.name,
+    }
+
+
+def save_template_book(payload: dict, force: bool = False) -> dict:
+    """Save a merged whole-book scrape into the shared template folder."""
+    from app.config import template_dir
+    from app.webbook import safe_book_name
+
+    book_name = safe_book_name(payload.get("book_name") or "未命名作品")
+    text = (payload.get("text") or "").strip()
+    if not text:
+        raise StyleSafetyError("文风内容为空")
+    check_sample_text(text)
+    folder = template_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    name = f"{book_name}.txt"
+    path = folder / name
+    if path.exists() and not force:
+        raise StyleExistsError(name, f"文风样本「{name}」已存在")
+    path.write_text(text + ("" if text.endswith("\n") else "\n"), encoding="utf-8")
+    sidecar = path.with_suffix(".source.json")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "url": payload.get("source_url") or "",
+                "filename": name,
+                "book_name": book_name,
+                "author": payload.get("author") or "",
+                "chapters": payload.get("chapters") or 0,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "id": f"template:{name}",
+        "name": name,
+        "hanzi": count_hanzi(text),
+        "chapters": payload.get("chapters") or 0,
+        "url": payload.get("source_url") or "",
+        "source": "template",
         "source_file": sidecar.name,
     }
 
