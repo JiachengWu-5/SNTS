@@ -1,6 +1,6 @@
 [project]
 name = "shanydoc"
-version = "0.1.0"
+version = "0.2.0"
 description = "SHANYDOC (SNTS, Shanydoc Novel Terminal System): a local web app for writing novels with a local llama.cpp-compatible LLM."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest==9.2.0"]
+# Optional helpers for importing a whole book/series as a style sample (traditional-to-simplified):
+zhconv = ["zhconv", "opencc-python-reimplemented"]
+
+[project.urls]
+Homepage = "https://github.com/JiachengWu-5/SNTS"
+Repository = "https://github.com/JiachengWu-5/SNTS"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

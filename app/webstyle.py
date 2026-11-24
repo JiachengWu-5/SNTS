@@ -73,7 +73,7 @@ def _is_public_ip(ip: ipaddress._BaseAddress) -> bool:
 async def fetch_and_extract(url: str) -> tuple[str, str]:
     current = validate_public_http_url(url)
     timeout = httpx.Timeout(connect=8.0, read=FETCH_TIMEOUT, write=8.0, pool=8.0)
-    headers = {"User-Agent": "NovelWriter/0.1 (style-sample fetch; local writing tool)"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "Accept-Language": "zh-CN,zh-TW;q=0.9,zh;q=0.8"}
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, headers=headers) as client:
         for _ in range(MAX_REDIRECTS + 1):
             validate_public_http_url(current)
@@ -108,7 +108,45 @@ async def fetch_and_extract(url: str) -> tuple[str, str]:
     return current, text
 
 
+def extract_reader_chapter(html: str) -> str:
+    """Pull title and paragraphs from common novel-reader markup."""
+    from html import unescape
+
+    title_match = re.search(
+        r'<h3[^>]*class="[^"]*j_chapterName[^"]*"[^>]*>(.*?)</h3>',
+        html or "",
+        re.I | re.S,
+    )
+    content_match = re.search(
+        r'<div[^>]*class="[^"]*(?:j_readContent|read-content)[^"]*"[^>]*>(.*?)</div>',
+        html or "",
+        re.I | re.S,
+    )
+    if not content_match:
+        return ""
+    paragraphs = []
+    for raw in re.findall(r"<p[^>]*>(.*?)</p>", content_match.group(1), re.I | re.S):
+        para = re.sub(r"<br\s*/?>", "\n", raw, flags=re.I)
+        para = re.sub(r"<[^>]+>", "", para)
+        para = unescape(para)
+        para = re.sub(r"[\xa0\u3000]", " ", para)
+        para = re.sub(r"[ \t]+", " ", para).strip()
+        if para:
+            paragraphs.append(para)
+    if not paragraphs:
+        return ""
+    title = ""
+    if title_match:
+        title = unescape(re.sub(r"<[^>]+>", "", title_match.group(1)))
+        title = re.sub(r"\s+", " ", title).strip()
+    lines = ([title, ""] if title else []) + paragraphs
+    return "\n".join(lines).strip()
+
+
 def extract_readable_text(html: str) -> str:
+    reader = extract_reader_chapter(html)
+    if reader:
+        return reader
     parser = _VisibleTextParser()
     parser.feed(html or "")
     parser.close()
@@ -117,7 +155,8 @@ def extract_readable_text(html: str) -> str:
     return text.strip()
 
 
-_SKIP = {"script", "style", "noscript", "svg", "canvas", "iframe", "template", "head", "meta", "link"}
+_SKIP = {"script", "style", "noscript", "svg", "canvas", "iframe", "template", "head"}
+_VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
 _NOISE = {"nav", "footer", "header", "aside", "form"}
 _MAIN = {"article", "main"}
 
@@ -134,7 +173,7 @@ class _VisibleTextParser(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
-        if tag in _SKIP or (tag == "meta"):
+        if tag in _SKIP and tag not in _VOID:
             self._skip += 1
         if tag in _NOISE:
             self._noise += 1

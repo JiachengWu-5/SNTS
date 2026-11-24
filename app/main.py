@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -19,7 +20,9 @@ from app.config import DEFAULT_LLM_URL, HOST, PORT
 from app.generate import (
     check_consistency,
     generate_chapter,
+    generate_chapters_until_end,
     generate_next_outline_chapter,
+    generate_outline_until_end,
     generate_this_outline_chapter,
     generate_outline,
     generate_world_draft,
@@ -27,7 +30,8 @@ from app.generate import (
     refresh_path_synopsis,
 )
 from app.llm import check_health
-from app.style import StyleSafetyError
+from app.style import StyleExistsError, StyleSafetyError
+from app import webbook
 from app.webstyle import StyleFetchError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -35,6 +39,7 @@ logger = logging.getLogger("novel_writer")
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR.parent / "static"
+APP_STARTED_AT = int(time.time())
 
 app = FastAPI(title="本地小说写作", version="0.1.0")
 
@@ -62,6 +67,7 @@ class StylePasteIn(BaseModel):
 
 class StyleFromUrlIn(BaseModel):
     url: str
+    force: bool = False
 
 
 class AddChapterIn(BaseModel):
@@ -86,6 +92,8 @@ class OutlineGenerateIn(BaseModel):
     from_chapter: str | None = None
     chapter_id: str | None = None
     notes: str | None = None
+    target_chapters: int | None = None
+    target_book_chars: int | None = None
 
 
 class WorldGenerateIn(BaseModel):
@@ -127,6 +135,18 @@ class ConsistencyIn(BaseModel):
     temperature: float | None = None
     enable_thinking: bool | None = True
     llm_url: str | None = None
+
+
+class ChaptersUntilIn(BaseModel):
+    from_chapter: str | None = None
+    target_chapters: int | None = None
+    target_book_chars: int | None = None
+    style_ids: list[str] | None = None
+    temperature: float | None = None
+    enable_thinking: bool | None = None
+    target_chars: int | None = None
+    llm_url: str | None = None
+    outline: str | None = None
 
 
 class ChapterGenerateIn(BaseModel):
@@ -188,6 +208,9 @@ class JobManager:
         self._cancel.set()
         return True
 
+    def set_chapter(self, chapter: str | None) -> None:
+        self._chapter = chapter
+
     def finish(self, job_id: str) -> None:
         if self._job_id == job_id:
             self._job_id = None
@@ -221,6 +244,8 @@ jobs = JobManager()
 def _book_exc(exc: Exception) -> HTTPException:
     if isinstance(exc, books.BookError):
         return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, StyleExistsError):
+        return HTTPException(status_code=409, detail={"code": "exists", "name": exc.name, "message": str(exc)})
     if isinstance(exc, (StyleSafetyError, StyleFetchError)):
         return HTTPException(status_code=400, detail=str(exc))
     raise exc
@@ -235,6 +260,7 @@ async def api_health(llm_url: str | None = None):
         "host": HOST,
         "port": PORT,
         "llm": llm,
+        "started_at": APP_STARTED_AT,
     }
 
 
@@ -647,9 +673,68 @@ def api_paste_style(name: str, body: StylePasteIn):
 @app.post("/api/books/{name}/styles/from-url")
 async def api_style_from_url(name: str, body: StyleFromUrlIn):
     try:
-        return await style.save_style_from_url(name, body.url)
-    except (books.BookError, StyleSafetyError, StyleFetchError) as exc:
+        books.ensure_book(name)
+        return await style.save_style_from_url(name, body.url, force=body.force)
+    except (books.BookError, StyleSafetyError, StyleFetchError, StyleExistsError) as exc:
         raise _book_exc(exc)
+
+
+@app.post("/api/books/{name}/styles/from-book-url")
+async def api_style_from_book_url(name: str, body: StyleFromUrlIn):
+    try:
+        books.ensure_book(name)
+    except books.BookError as exc:
+        raise _book_exc(exc)
+
+    async def events():
+        try:
+            result = None
+            async for event in webbook.iter_extract_all(body.url):
+                kind = event.get("kind")
+                if kind == "status":
+                    yield _sse("status", {"message": event.get("message") or "正在抓取…"})
+                elif kind == "catalog":
+                    from app.config import template_dir
+
+                    existing = template_dir() / f"{event['book_name']}.txt"
+                    if existing.exists() and not body.force:
+                        yield _sse(
+                            "exists",
+                            {
+                                "name": existing.name,
+                                "message": f"文风样本「{existing.name}」已存在，要覆盖吗？",
+                                "book_name": event["book_name"],
+                                "total": event.get("total") or 0,
+                            },
+                        )
+                        return
+                    yield _sse(
+                        "status",
+                        {"message": f"正在抓取《{event['book_name']}》，共 {event.get('total') or 0} 章…"},
+                    )
+                elif kind == "progress":
+                    yield _sse(
+                        "status",
+                        {
+                            "message": f"正在抓取 {event.get('current')}/{event.get('total')}：{event.get('title') or ''}",
+                            "current": event.get("current"),
+                            "total": event.get("total"),
+                        },
+                    )
+                elif kind == "result":
+                    result = event
+            if result:
+                saved = style.save_template_book(result, force=body.force)
+                yield _sse("done", saved)
+        except StyleExistsError as exc:
+            yield _sse("exists", {"name": exc.name, "message": str(exc)})
+        except (books.BookError, StyleSafetyError, StyleFetchError) as exc:
+            yield _sse("error", {"message": str(exc)})
+        except Exception:
+            logger.exception("whole-book style fetch failed")
+            yield _sse("error", {"message": "抓取全本时出错，请稍后重试"})
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers=_sse_headers())
 
 
 @app.post("/api/books/{name}/styles/upload")
@@ -716,6 +801,35 @@ async def api_generate_next_outline(name: str, body: OutlineGenerateIn):
 
     return StreamingResponse(events(), media_type="text/event-stream", headers=_sse_headers())
 
+
+@app.post("/api/books/{name}/generate/outline-until")
+async def api_generate_outline_until(name: str, body: OutlineGenerateIn):
+    job_id, cancel = await jobs.start(book=name)
+
+    async def events():
+        try:
+            yield _sse("meta", {"job_id": job_id, "kind": "outline-until"})
+            async for event in generate_outline_until_end(
+                name,
+                idea=body.idea,
+                outline=body.outline,
+                from_chapter=body.from_chapter,
+                target_chapters=body.target_chapters,
+                target_book_chars=body.target_book_chars,
+                style_ids=body.style_ids,
+                temperature=body.temperature,
+                enable_thinking=body.enable_thinking,
+                llm_url=body.llm_url,
+                cancel_event=cancel,
+            ):
+                yield _event_to_sse(event)
+        except Exception:
+            logger.exception("outline-until generation failed")
+            yield _sse("error", {"message": "一键写完大纲时出错，已写好的部分都保留了。请查看服务窗口或稍后重试"})
+        finally:
+            jobs.finish(job_id)
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers=_sse_headers())
 
 
 @app.post("/api/books/{name}/generate/outline-section")
@@ -850,6 +964,37 @@ async def api_refresh_synopsis(name: str, chapter_id: str, body: TextIn | None =
     return StreamingResponse(events(), media_type="text/event-stream", headers=_sse_headers())
 
 
+@app.post("/api/books/{name}/generate/chapters-until")
+async def api_generate_chapters_until(name: str, body: ChaptersUntilIn):
+    job_id, cancel = await jobs.start(book=name)
+
+    async def events():
+        try:
+            yield _sse("meta", {"job_id": job_id, "kind": "chapters-until"})
+            async for event in generate_chapters_until_end(
+                name,
+                from_chapter=body.from_chapter,
+                target_chapters=body.target_chapters,
+                target_book_chars=body.target_book_chars,
+                style_ids=body.style_ids,
+                temperature=body.temperature,
+                enable_thinking=body.enable_thinking,
+                target_chars=body.target_chars,
+                llm_url=body.llm_url,
+                outline=body.outline,
+                cancel_event=cancel,
+                on_chapter=jobs.set_chapter,
+            ):
+                yield _event_to_sse(event)
+        except Exception:
+            logger.exception("chapters-until generation failed")
+            yield _sse("error", {"message": "一键写完正文时出错，已写好的部分都保留了。请查看服务窗口或稍后重试"})
+        finally:
+            jobs.finish(job_id)
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers=_sse_headers())
+
+
 @app.post("/api/books/{name}/generate/chapter")
 async def api_generate_chapter(name: str, body: ChapterGenerateIn):
     job_id, cancel = await jobs.start(book=name, chapter=body.chapter)
@@ -905,11 +1050,22 @@ def _event_to_sse(event) -> str:
     if event.kind == "thinking":
         return _sse("status", {"message": "正在思考…"})
     if event.kind == "status":
-        return _sse("status", {"message": event.message})
+        payload = {"message": event.message}
+        payload.update(event.extra or {})
+        return _sse("status", payload)
     if event.kind == "cancelled":
-        return _sse("cancelled", {"message": event.message or "已停止生成"})
+        payload = {"message": event.message or "已停止生成"}
+        payload.update(event.extra or {})
+        if event.text:
+            payload.setdefault("outline", event.text)
+            payload.setdefault("text", event.text)
+        return _sse("cancelled", payload)
     if event.kind == "error":
         return _sse("error", {"message": event.message})
+    if event.kind == "chapter":
+        payload = {"text": event.text}
+        payload.update(event.extra or {})
+        return _sse("chapter", payload)
     if event.kind == "done":
         payload = {"text": event.text, "hanzi": event.result.hanzi if event.result else 0}
         payload.update(event.extra or {})
@@ -1092,9 +1248,37 @@ def api_insert_illustration_marker(name: str, illust_id: str):
         raise _book_exc(exc)
 
 
+@app.post("/api/server/reload")
+def api_reload_server():
+    if jobs.is_busy():
+        raise HTTPException(status_code=409, detail="正在生成中，请先等当前任务结束，或点停止后再重新加载")
+    try:
+        from app import modelswap
+
+        if modelswap.session_status().get("illustration_session") or modelswap.session_status().get("session_active"):
+            raise HTTPException(status_code=409, detail="正在出图，请先等配图结束后再重新加载")
+        from app.serverctl import schedule_reload
+
+        schedule_reload()
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("schedule reload failed")
+        raise HTTPException(status_code=500, detail="无法启动重新加载，请稍后重试")
+    return {"ok": True, "message": "正在重新加载写作服务…", "started_at": APP_STARTED_AT}
+
+
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace("?v=extractbook2", f"?v={APP_STARTED_AT}")
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 if STATIC_DIR.exists():

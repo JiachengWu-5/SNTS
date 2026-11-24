@@ -2,8 +2,6 @@ from app.generate import (
     join_chapter_chunks,
     revise_needed_tokens,
     revise_result_too_short,
-    revise_short_notice,
-    _revise_done_extra,
     revise_should_chunk,
     split_chapter_chunks,
 )
@@ -50,21 +48,3 @@ def test_plan_max_tokens_does_not_invent_room():
     planned = plan_max_tokens(prompt, target_chars=7000, enable_thinking=True, context_tokens=16384)
     room = available_output_tokens(prompt, 16384)
     assert planned <= room
-
-
-def test_revise_short_notice_does_not_discard():
-    original = "字" * 1000
-    short = "字" * 300
-    assert revise_result_too_short(original, short) is True
-    notice = revise_short_notice(original, short)
-    assert notice is not None
-    assert "300" in notice
-    assert "700" in notice
-    assert "恢复上一版" in notice
-    assert revise_short_notice(original, "字" * 800) is None
-    extra = _revise_done_extra("03", original, short)
-    assert extra["saved"] is True
-    assert extra["short_warning"] is True
-    assert extra["hanzi"] == 300
-    assert extra["old_hanzi"] == 1000
-    assert "恢复上一版" in extra["message"]

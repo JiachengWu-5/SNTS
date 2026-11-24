@@ -595,10 +595,13 @@ def find_node(tree: dict, node_id: str | None) -> dict | None:
             wanted_cid = None
     except BookError:
         wanted_cid = None
+    outline_key = int(wanted[1:]) if re.fullmatch(r"o\d+", wanted) else None
     for node in tree.get("nodes") or []:
         if node.get("id") == wanted or node.get("id") == node_id:
             return node
         if wanted_cid and node.get("chapter_id") == wanted_cid:
+            return node
+        if outline_key is not None and node.get("outline_index") == outline_key:
             return node
     return None
 

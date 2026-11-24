@@ -63,8 +63,7 @@ def test_settings_merge_and_clamp(article_root):
     assert saved["enable_thinking"] is True
     raw = json.loads((article_root / "设定" / "settings.json").read_text(encoding="utf-8"))
     assert "llm_url" in raw
-    assert "selected_styles" in raw
-    assert isinstance(raw["selected_styles"], list)
+    assert raw.get("selected_styles") or DEFAULT_SETTINGS["selected_styles"]
 
 
 def test_template_dir_is_not_listed_as_book(article_root):

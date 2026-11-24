@@ -184,6 +184,14 @@ def read_outline(name: str) -> str:
 
 
 def write_outline(name: str, text: str) -> dict:
+    previous = read_outline(name)
+    if previous.strip() and not (text or "").strip():
+        backup_outline(name)
+        try:
+            from app.history import capture_outline
+            capture_outline(name, previous, "clear")
+        except Exception:
+            pass
     _write_text(ensure_book(name) / OUTLINE_FILE, text or "")
     result = {"ok": True, "hanzi": count_hanzi(text)}
     try:
